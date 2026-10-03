@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0d0d0d">
+  <title>Jellyfin Remote</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/remote.css') }}">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+</head>
+<body>
+
+<!-- ── Status Bar ─────────────────────────────────────────────────────────── -->
+<div id="status-bar">
+  <div id="conn-indicator">
+    <span id="conn-dot" class="dot-off"></span>
+    <span id="conn-text">Connecting…</span>
+  </div>
+  <div id="app-title">
+    <svg viewBox="0 0 82 16" fill="none" height="16">
+      <circle cx="8" cy="8" r="7" fill="#e5a00d"/>
+      <text x="18" y="12" font-family="Arial" font-weight="700" font-size="11" fill="white">JELLYFIN</text>
+    </svg>
+    <span>Remote</span>
+  </div>
+  <div id="volume-badge">🔊 <span id="vol-value">100</span></div>
+</div>
+
+<!-- ── Now Playing Card ───────────────────────────────────────────────────── -->
+<div id="now-playing-card">
+  <img id="np-thumb" alt="" hidden>
+  <div id="np-text">
+    <div id="np-title">Not Playing</div>
+    <div id="np-subtitle"></div>
+    <div id="np-progress-wrap">
+      <div id="np-progress-bar"><div id="np-progress-fill"></div></div>
+      <span id="np-time">—</span>
+    </div>
+  </div>
+  <div id="np-state-icon">⏸</div>
+</div>
+
+<!-- ── Tab Navigation ─────────────────────────────────────────────────────── -->
+<div id="tab-bar">
+  <button class="tab active" data-tab="dpad">🕹 Navigate</button>
+  <button class="tab" data-tab="media">⏯ Playback</button>
+  <button class="tab" data-tab="volume">🔊 Volume</button>
+  <button class="tab" data-tab="lights">💡 Lights</button>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB: D-PAD NAVIGATION
+═══════════════════════════════════════ -->
+<div id="tab-dpad" class="tab-content active">
+
+  <!-- Top action row -->
+  <div class="action-row">
+    <button class="pill-btn" data-action="home">🏠 Home</button>
+    <button class="pill-btn" data-action="search">🔍 Search</button>
+    <button class="pill-btn" data-action="back">← Back</button>
+  </div>
+
+  <!-- D-Pad -->
+  <div class="dpad-wrap">
+    <div class="dpad">
+      <button class="dpad-btn dpad-up"    data-action="up">▲</button>
+      <button class="dpad-btn dpad-left"  data-action="left">◀</button>
+      <button class="dpad-btn dpad-center" data-action="select">OK</button>
+      <button class="dpad-btn dpad-right" data-action="right">▶</button>
+      <button class="dpad-btn dpad-down"  data-action="down">▼</button>
+    </div>
+  </div>
+
+  <!-- Quick vol row under dpad -->
+  <div class="action-row mini">
+    <button class="icon-btn" data-action="vol_down">🔉</button>
+    <button class="icon-btn" data-action="play">▶</button>
+    <button class="icon-btn" data-action="pause">⏸</button>
+    <button class="icon-btn" data-action="vol_up">🔊</button>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB: MEDIA CONTROLS
+═══════════════════════════════════════ -->
+<div id="tab-media" class="tab-content hidden">
+
+  <!-- Seek bar (send seek command on release) -->
+  <div id="seek-section">
+    <label>Seek</label>
+    <input type="range" id="seek-bar" min="0" max="100" value="0">
+    <div id="seek-times">
+      <span id="seek-current">0:00</span>
+      <span id="seek-total">0:00</span>
+    </div>
+  </div>
+
+  <!-- Playback controls grid -->
+  <div class="media-grid">
+    <button class="media-btn" data-action="stop">⏹ Stop</button>
+    <button class="media-btn" data-action="seek_back">⏪ -10s</button>
+    <button class="media-btn big-play" data-action="toggle_play">▶⏸ Play/Pause</button>
+    <button class="media-btn" data-action="seek_fwd">⏩ +10s</button>
+    <button class="media-btn" data-action="previous">⏮ Prev</button>
+    <button class="media-btn" data-action="next">⏭ Next</button>
+  </div>
+
+  <!-- Subtitle / Audio row -->
+  <div class="action-row">
+    <button class="pill-btn" data-action="toggle_subs">CC Subtitles</button>
+    <button class="pill-btn" data-action="toggle_audio">🎧 Audio</button>
+    <button class="pill-btn" data-action="aspect">🖥 Screen Fit</button>
+    <button class="pill-btn" data-action="fullscreen">⛶ Fullscreen</button>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB: VOLUME
+═══════════════════════════════════════ -->
+<div id="tab-volume" class="tab-content hidden">
+  <div id="vol-section">
+    <div id="vol-display">
+      <div id="vol-icon">🔊</div>
+      <div id="vol-number">100</div>
+    </div>
+    <input type="range" id="vol-slider" min="0" max="100" value="100"
+           orient="vertical" class="vertical-slider">
+    <div id="vol-buttons">
+      <button class="vol-btn" data-action="vol_up">+ Volume</button>
+      <button class="vol-btn mute-btn" data-action="mute">🔇 Mute</button>
+      <button class="vol-btn" data-action="vol_down">- Volume</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════
+     TAB: LIGHTS (WLED)
+═══════════════════════════════════════ -->
+<div id="tab-lights" class="tab-content hidden">
+  <div id="lights-unconfigured" class="hidden">
+    <p class="lights-hint">
+      No WLED controller configured.<br>
+      Run <code>python find_wled.py</code> and put the addresses it prints
+      into <code>WLED_IP</code> in <code>config.py</code>.
+    </p>
+  </div>
+
+  <div id="lights-controls" class="hidden">
+    <!-- One switch for the whole thing. "Ambilight" hands the strips to
+         SignalRGB; the other two take them back, which is what makes Off
+         actually mean off while SignalRGB is still streaming. -->
+    <div class="mode-grid">
+      <button class="mode-btn" data-wled-mode="ambilight">
+        <span class="mode-icon">🎬</span>
+        <span class="mode-name">Ambilight</span>
+        <span class="mode-sub">Follow the screen</span>
+      </button>
+      <button class="mode-btn" data-wled-mode="manual">
+        <span class="mode-icon">💡</span>
+        <span class="mode-name">Manual</span>
+        <span class="mode-sub">Plain light</span>
+      </button>
+      <button class="mode-btn" data-wled-mode="off">
+        <span class="mode-icon">🌙</span>
+        <span class="mode-name">Off</span>
+        <span class="mode-sub">Lights out</span>
+      </button>
+    </div>
+
+    <p id="lights-status" class="lights-hint"></p>
+
+    <div id="wled-bri-section">
+      <label>Brightness</label>
+      <input type="range" id="wled-bri" min="1" max="255" value="128">
+      <div class="action-row mini">
+        <button class="icon-btn" data-wled-bri="26">10%</button>
+        <button class="icon-btn" data-wled-bri="64">25%</button>
+        <button class="icon-btn" data-wled-bri="128">50%</button>
+        <button class="icon-btn" data-wled-bri="255">100%</button>
+      </div>
+    </div>
+
+    <div class="wled-device" id="wled-auto-row">
+      <span class="wled-dev-name">Dim when playing</span>
+      <span class="wled-dev-meta" id="wled-auto-meta"></span>
+      <button class="pill-btn tiny" id="wled-auto-toggle">On</button>
+    </div>
+
+    <label class="lights-label">Controllers</label>
+    <div id="wled-devices"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/remote.js') }}"></script>
+</body>
+</html>

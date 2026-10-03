@@ -1,0 +1,11 @@
+flask>=3.0.0
+flask-socketio>=5.3.6
+# Serves real WebSockets under Socket.IO's "threading" async mode, which app.py
+# pins on purpose. Without it the remote falls back to long-polling and still
+# works, just with more latency.
+simple-websocket>=1.0.0
+requests>=2.31.0
+
+# YouTube app (ad-free playback). Also requires ffmpeg on PATH.
+# Update regularly: YouTube changes break old versions (pip install -U yt-dlp)
+yt-dlp>=2025.1.1

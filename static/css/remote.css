@@ -1,0 +1,298 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Jellyfin Home Theater — Phone Remote Styles
+   Mobile-first, big touch targets, dark theme
+═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --accent:      #e5a00d;
+  --accent-h:    #f5b51d;
+  --bg:          #0d0d0d;
+  --surface:     #1a1a1a;
+  --surface2:    #242424;
+  --surface3:    #2e2e2e;
+  --text:        #ffffff;
+  --text-muted:  #aaaaaa;
+  --radius:      14px;
+  --btn-radius:  12px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Status Bar ──────────────────────────────────────────────────────────── */
+#status-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid #2a2a2a;
+  position: sticky; top: 0; z-index: 100;
+}
+
+#conn-indicator { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.dot-on  { width: 8px; height: 8px; border-radius: 50%; background: #00cc66;
+           box-shadow: 0 0 8px #00cc66; animation: pulse-green 2s infinite; }
+.dot-off { width: 8px; height: 8px; border-radius: 50%; background: #ff5050; }
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+}
+
+#app-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; font-weight: 800; letter-spacing: 1px;
+  color: var(--text);
+}
+
+#volume-badge { font-size: 13px; color: var(--text-muted); }
+
+/* ── Now Playing Card ────────────────────────────────────────────────────── */
+#now-playing-card {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid #2a2a2a;
+  min-height: 80px;
+}
+
+#np-thumb {
+  width: 52px; height: 52px; border-radius: 8px;
+  object-fit: cover; background: var(--surface2);
+  flex-shrink: 0;
+}
+
+#np-text { flex: 1; overflow: hidden; }
+#np-title    { font-size: 14px; font-weight: 700; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+#np-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+#np-progress-wrap { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+#np-progress-bar  { flex: 1; height: 3px; background: #333; border-radius: 2px; }
+#np-progress-fill { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; }
+#np-time          { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+
+#np-state-icon { font-size: 22px; flex-shrink: 0; }
+
+/* ── Tab Bar ─────────────────────────────────────────────────────────────── */
+#tab-bar {
+  display: flex;
+  background: var(--surface);
+  border-bottom: 2px solid #2a2a2a;
+}
+.tab {
+  flex: 1; padding: 12px 4px;
+  background: none; border: none; color: var(--text-muted);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.2s;
+  touch-action: manipulation;
+}
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ── Tab Content ──────────────────────────────────────────────────────────── */
+.tab-content {
+  padding: 20px 20px 100px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 20px;
+}
+.tab-content.hidden { display: none; }
+
+/* A general .hidden, which this stylesheet was missing — only
+   `.tab-content.hidden` existed, so toggling `hidden` on anything else (the
+   Lights tab's configured/unconfigured blocks, the now-playing thumbnail) did
+   nothing and both states rendered at once. tv.css has always had this rule. */
+.hidden { display: none !important; }
+
+/* ── Action Row ──────────────────────────────────────────────────────────── */
+.action-row {
+  display: flex; gap: 12px;
+}
+.action-row.mini { gap: 8px; }
+
+.pill-btn {
+  flex: 1; padding: 14px;
+  background: var(--surface2); color: var(--text);
+  border: 1.5px solid #333; border-radius: 24px;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: all 0.15s; touch-action: manipulation;
+  text-align: center;
+}
+.pill-btn:active { background: var(--accent); color: #000; transform: scale(0.96); }
+
+.icon-btn {
+  flex: 1; padding: 16px 8px;
+  background: var(--surface2); color: var(--text);
+  border: 1.5px solid #333; border-radius: var(--btn-radius);
+  font-size: 22px; cursor: pointer;
+  transition: all 0.15s; touch-action: manipulation;
+  text-align: center;
+}
+.icon-btn:active { background: var(--accent); color: #000; transform: scale(0.93); }
+
+/* ── D-Pad ───────────────────────────────────────────────────────────────── */
+.dpad-wrap {
+  display: flex; justify-content: center; align-items: center;
+  padding: 10px 0;
+}
+
+.dpad {
+  display: grid;
+  grid-template-columns: 90px 90px 90px;
+  grid-template-rows:    90px 90px 90px;
+  gap: 6px;
+  width: fit-content;
+}
+
+.dpad-btn {
+  background: var(--surface2); color: var(--text);
+  border: 1.5px solid #333; border-radius: var(--btn-radius);
+  font-size: 22px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  touch-action: manipulation;
+  transition: all 0.12s;
+}
+.dpad-btn:active { background: var(--accent); color: #000; transform: scale(0.91); }
+
+.dpad-up     { grid-column: 2; grid-row: 1; }
+.dpad-left   { grid-column: 1; grid-row: 2; }
+.dpad-center {
+  grid-column: 2; grid-row: 2;
+  background: var(--accent); color: #000; border-color: var(--accent);
+  font-size: 15px; font-weight: 900;
+  border-radius: 50%;
+}
+.dpad-center:active { background: var(--accent-h); transform: scale(0.91); }
+.dpad-right  { grid-column: 3; grid-row: 2; }
+.dpad-down   { grid-column: 2; grid-row: 3; }
+
+/* ── Media Controls ──────────────────────────────────────────────────────── */
+#seek-section { display: flex; flex-direction: column; gap: 8px; }
+#seek-section label { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+#seek-bar {
+  width: 100%; height: 6px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+#seek-times {
+  display: flex; justify-content: space-between;
+  font-size: 12px; color: var(--text-muted);
+}
+
+.media-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.media-btn {
+  padding: 18px; border-radius: var(--btn-radius);
+  background: var(--surface2); color: var(--text);
+  border: 1.5px solid #333;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  touch-action: manipulation; transition: all 0.15s;
+  text-align: center;
+}
+.media-btn:active { background: var(--accent); color: #000; transform: scale(0.95); }
+.media-btn.big-play {
+  grid-column: 1 / -1;
+  background: var(--accent); color: #000; border-color: var(--accent);
+  font-size: 16px; padding: 22px;
+}
+.media-btn.big-play:active { background: var(--accent-h); }
+
+/* ── Volume Tab ──────────────────────────────────────────────────────────── */
+#vol-section {
+  display: flex; flex-direction: column; align-items: center; gap: 24px;
+  padding-top: 20px;
+}
+#vol-display { text-align: center; }
+#vol-icon   { font-size: 48px; }
+#vol-number { font-size: 36px; font-weight: 800; color: var(--accent); margin-top: 4px; }
+
+.vertical-slider {
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  width: 40px; height: 220px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+#vol-buttons { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.vol-btn {
+  padding: 18px; border-radius: var(--btn-radius);
+  background: var(--surface2); color: var(--text);
+  border: 1.5px solid #333;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  touch-action: manipulation; transition: all 0.15s;
+  text-align: center;
+}
+.vol-btn:active { background: var(--accent); color: #000; transform: scale(0.96); }
+.vol-btn.mute-btn { border-color: #555; }
+
+/* ── Lights (WLED) tab ────────────────────────────────────────────────── */
+.lights-hint {
+  text-align: center; color: #888; line-height: 1.8;
+  padding: 40px 24px; font-size: 14px;
+}
+.lights-hint code {
+  color: #e5a00d; background: #2a2a2a;
+  padding: 2px 6px; border-radius: 4px;
+}
+.lights-label {
+  display: block; color: #888; font-size: 13px;
+  margin: 18px 4px 8px;
+}
+#wled-bri-section { margin: 18px 4px; }
+#wled-bri-section label { color: #888; font-size: 13px; }
+#wled-bri { width: 100%; margin: 10px 0 12px; accent-color: #e5a00d; }
+
+/* The three light modes, as one obvious three-way switch. */
+.mode-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+}
+.mode-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 16px 6px;
+  background: var(--surface2); color: var(--text);
+  border: 1.5px solid #333; border-radius: var(--btn-radius);
+  cursor: pointer; touch-action: manipulation;
+  transition: all 0.15s;
+}
+.mode-btn:active { transform: scale(0.96); }
+.mode-btn .mode-icon { font-size: 26px; line-height: 1; }
+.mode-btn .mode-name { font-size: 14px; font-weight: 700; }
+.mode-btn .mode-sub  { font-size: 10px; color: #888; text-align: center; }
+.mode-btn.active {
+  background: rgba(229,160,13,0.14);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.mode-btn.active .mode-name { color: var(--accent); }
+.mode-btn.active .mode-sub  { color: #b9924a; }
+
+/* Status line sits directly under the modes, so it reads as their caption
+   rather than as the empty-state hint it shares a class with. */
+#lights-status { padding: 14px 6px 0; text-align: left; font-size: 12px; }
+#lights-status:empty { display: none; }
+
+/* One row per controller, for turning a single strip on or off. */
+.wled-device {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; margin-bottom: 8px;
+  background: var(--surface2);
+  border: 1.5px solid #2f2f2f; border-radius: 10px;
+}
+.wled-dev-name { flex: 1; font-size: 14px; font-weight: 600; }
+.wled-dev-meta { color: #777; font-size: 11px; }
+.pill-btn.tiny {
+  flex: 0 0 auto; padding: 8px 18px; font-size: 13px; border-radius: 16px;
+}
+.pill-btn.tiny.active { border-color: var(--accent); color: var(--accent); }

@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Jellyfin Home Theater</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tv.css') }}">
+  <!-- HLS.js for adaptive streaming -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.7/hls.min.js"></script>
+  <!-- Socket.IO -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════
+     LOADING SCREEN
+═══════════════════════════════════════════════════ -->
+<div id="loading-screen">
+  <div class="loader-logo">
+    <svg viewBox="0 -3 156 33" fill="none">
+      <circle cx="15" cy="15" r="12" fill="#e5a00d"/>
+      <text x="32" y="21" font-family="Arial" font-weight="700" font-size="16" fill="white">JELLYFIN</text>
+    </svg>
+  </div>
+  <div class="loader-spinner"></div>
+  <p class="loader-text">Connecting to your media…</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SIDEBAR (pop-out nav — home screen only)
+═══════════════════════════════════════════════════ -->
+<nav id="sidebar" aria-hidden="true">
+  <div id="sidebar-inner">
+    <div class="sb-item" data-sb="search"><span class="sb-icon">🔍</span><span class="sb-label">Search</span></div>
+    <div class="sb-item" data-sb="home"><span class="sb-icon">🏠</span><span class="sb-label">Home</span></div>
+    <div class="sb-item" data-sb="youtube"><span class="sb-icon sb-yt">▶</span><span class="sb-label">YouTube</span></div>
+    <div class="sb-sep"></div>
+    <div id="sb-libraries"></div>
+  </div>
+</nav>
+<div id="sidebar-scrim"></div>
+
+<!-- ═══════════════════════════════════════════════════
+     HOME SCREEN
+═══════════════════════════════════════════════════ -->
+<div id="screen-home" class="screen hidden">
+  <!-- Top bar -->
+  <div id="home-topbar">
+    <button class="topbar-btn focusable" data-action="open-search">🔍 Search</button>
+    <span class="topbar-hint">◀ nav</span>
+  </div>
+
+  <!-- Backdrop hero -->
+  <div id="hero-backdrop">
+    <div class="hero-gradient"></div>
+    <div id="hero-info">
+      <div id="hero-badge">CONTINUE WATCHING</div>
+      <h1 id="hero-title">Loading…</h1>
+      <p id="hero-meta"></p>
+      <p id="hero-summary"></p>
+      <div id="hero-buttons">
+        <button class="hero-btn primary focusable" data-action="play-hero">▶ Play</button>
+        <button class="hero-btn secondary focusable" data-action="info-hero">ⓘ More Info</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rows -->
+  <div id="rows-container">
+    <div class="row-section" id="row-apps">
+      <h2 class="row-title">Apps</h2>
+      <div class="row-items" id="items-apps">
+        <div class="app-card app-youtube focusable" id="app-youtube" tabindex="0">
+          <span class="app-icon">▶</span>
+          <span class="app-name">YouTube</span>
+        </div>
+      </div>
+    </div>
+    <div class="row-section" id="row-continue">
+      <h2 class="row-title">Continue Watching</h2>
+      <div class="row-items" id="items-continue"></div>
+    </div>
+    <div class="row-section" id="row-recent">
+      <h2 class="row-title">Recently Added</h2>
+      <div class="row-items" id="items-recent"></div>
+    </div>
+    <div class="row-section hidden" id="row-collections">
+      <h2 class="row-title">Collections</h2>
+      <div class="row-items" id="items-collections"></div>
+    </div>
+    <div class="row-section hidden" id="row-playlists">
+      <h2 class="row-title">Playlists</h2>
+      <div class="row-items" id="items-playlists"></div>
+    </div>
+    <!-- Dynamic library rows injected here -->
+    <div id="library-rows"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SEARCH SCREEN
+═══════════════════════════════════════════════════ -->
+<div id="screen-search" class="screen hidden">
+  <div class="screen-header">
+    <button class="back-btn focusable" data-action="back" id="search-back-btn">← Back</button>
+    <h1>Search</h1>
+  </div>
+
+  <div id="search-body">
+    <div id="search-left">
+      <div id="search-input-wrap">
+        <span id="search-input-text"></span>
+        <span id="search-cursor"></span>
+      </div>
+      <div id="osk"></div>
+      <div id="osk-hint">Use D-Pad to navigate · OK to type · Long-press / Backspace to delete</div>
+    </div>
+    <div id="search-right">
+      <h2 class="row-title" id="search-results-title">Results</h2>
+      <div id="search-results" class="poster-grid"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     YOUTUBE SCREEN
+═══════════════════════════════════════════════════ -->
+<div id="screen-youtube" class="screen hidden">
+  <div class="screen-header">
+    <button class="back-btn focusable" data-action="back" id="yt-back-btn">← Back</button>
+    <h1><span class="yt-logo">▶</span> YouTube</h1>
+  </div>
+
+  <div id="yt-body">
+    <div id="yt-left">
+      <div id="yt-input-wrap" class="search-input-wrap">
+        <span id="yt-input-text"></span>
+        <span class="search-cursor"></span>
+      </div>
+      <div id="yt-osk"></div>
+    </div>
+    <div id="yt-right">
+      <h2 class="row-title" id="yt-results-title">Recently Watched</h2>
+      <div id="yt-results" class="yt-grid"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     LIBRARY SCREEN (grid browse)
+═══════════════════════════════════════════════════ -->
+<div id="screen-library" class="screen hidden">
+  <div class="screen-header">
+    <button class="back-btn focusable" data-action="back">← Back</button>
+    <h1 id="library-title">Library</h1>
+    <div id="library-toolbar">
+      <button class="toolbar-btn focusable" id="btn-sort">Sort: Title ▾</button>
+      <button class="toolbar-btn focusable" id="btn-filter-genre">Genre: All ▾</button>
+      <button class="toolbar-btn focusable" id="btn-filter-decade">Decade: All ▾</button>
+      <button class="toolbar-btn focusable" id="btn-filter-unwatched">Unwatched only: Off</button>
+    </div>
+  </div>
+  <div id="library-grid" class="poster-grid"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     DETAIL SCREEN
+═══════════════════════════════════════════════════ -->
+<div id="screen-detail" class="screen hidden">
+  <div id="detail-backdrop">
+    <div class="hero-gradient"></div>
+  </div>
+  <div id="detail-content">
+    <div id="detail-poster-wrap">
+      <img id="detail-poster" src="" alt="">
+    </div>
+    <div id="detail-info">
+      <div id="detail-rating-badge"></div>
+      <h1 id="detail-title"></h1>
+      <p id="detail-meta"></p>
+      <div id="detail-ratings"></div>
+      <p id="detail-summary"></p>
+      <div id="detail-genres"></div>
+      <div id="detail-buttons">
+        <button class="hero-btn primary focusable" id="btn-play-detail">▶ Play</button>
+        <button class="hero-btn secondary focusable" id="btn-mark-watched">✓ Mark Watched</button>
+      </div>
+      <div id="detail-credits">
+        <div id="detail-directors" class="credit-line"></div>
+        <div id="detail-cast" class="credit-line"></div>
+      </div>
+
+      <!-- Seasons tabs (for shows) -->
+      <div id="seasons-section" class="hidden">
+        <div id="season-tabs" class="tab-row"></div>
+        <div id="episodes-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     PLAYER SCREEN
+═══════════════════════════════════════════════════ -->
+<div id="screen-player" class="screen hidden">
+  <video id="video-player" preload="auto"></video>
+
+  <!-- Overlay controls (fade out when idle) -->
+  <div id="player-overlay" class="overlay-visible">
+    <div id="overlay-top">
+      <button class="player-btn focusable" id="btn-player-back">← Back</button>
+      <div id="now-playing-info">
+        <span id="np-title"></span>
+        <span id="np-subtitle"></span>
+      </div>
+    </div>
+
+    <div id="overlay-center">
+      <button class="ctrl-btn focusable" id="btn-seek-back">⏪ 10s</button>
+      <button class="ctrl-btn play-pause-btn focusable" id="btn-play-pause">⏸</button>
+      <button class="ctrl-btn focusable" id="btn-seek-fwd">⏩ 10s</button>
+    </div>
+
+    <div id="overlay-bottom">
+      <div id="progress-wrap">
+        <span id="time-current">0:00</span>
+        <div id="progress-bar">
+          <div id="progress-buffered"></div>
+          <div id="progress-filled"></div>
+          <div id="progress-thumb"></div>
+        </div>
+        <span id="time-total">0:00</span>
+      </div>
+      <div id="player-bottom-controls">
+        <span id="pb-title-small"></span>
+        <div class="player-right-controls">
+          <button class="ctrl-btn-sm focusable" id="btn-audio">🎧 Audio</button>
+          <button class="ctrl-btn-sm focusable" id="btn-subs">CC</button>
+          <button class="ctrl-btn-sm focusable" id="btn-quality">⚙ Quality</button>
+          <button class="ctrl-btn-sm focusable" id="btn-aspect">🖥 Auto</button>
+          <button class="ctrl-btn-sm focusable" id="btn-vol">🔊</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Subtitle display -->
+  <div id="subtitle-display"></div>
+
+  <!-- Skip Intro / Skip Credits (shows while inside a media segment) -->
+  <button id="skip-marker-btn" class="hidden">Skip Intro</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     MODAL: Resume / Start over
+═══════════════════════════════════════════════════ -->
+<div id="modal-resume" class="modal hidden">
+  <div class="modal-card">
+    <h2 id="resume-title">Resume?</h2>
+    <p id="resume-summary"></p>
+    <div class="modal-actions">
+      <button class="hero-btn primary focusable" id="btn-resume">▶ Resume from <span id="resume-time">0:00</span></button>
+      <button class="hero-btn secondary focusable" id="btn-startover">↺ Start Over</button>
+      <button class="hero-btn ghost focusable" id="btn-resume-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     MODAL: Track selector (audio / subtitles)
+═══════════════════════════════════════════════════ -->
+<div id="modal-tracks" class="modal hidden">
+  <div class="modal-card track-card">
+    <div class="track-tabs">
+      <button class="track-tab focusable active" data-tracktab="subs">Subtitles</button>
+      <button class="track-tab focusable" data-tracktab="audio">Audio</button>
+    </div>
+    <div id="track-list" class="track-list"></div>
+    <div class="modal-actions">
+      <button class="hero-btn ghost focusable" id="btn-tracks-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     MODAL: Quality selector
+═══════════════════════════════════════════════════ -->
+<div id="modal-quality" class="modal hidden">
+  <div class="modal-card track-card">
+    <h2>Stream Quality</h2>
+    <div id="quality-list" class="track-list"></div>
+    <div class="modal-actions">
+      <button class="hero-btn ghost focusable" id="btn-quality-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     MODAL: Sort & filter pickers (shared)
+═══════════════════════════════════════════════════ -->
+<div id="modal-picker" class="modal hidden">
+  <div class="modal-card track-card">
+    <h2 id="picker-title">Sort by</h2>
+    <div id="picker-list" class="track-list"></div>
+    <div class="modal-actions">
+      <button class="hero-btn ghost focusable" id="btn-picker-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     NEXT EPISODE COUNTDOWN
+═══════════════════════════════════════════════════ -->
+<div id="next-up" class="hidden">
+  <div id="next-up-thumb-wrap">
+    <img id="next-up-thumb" src="" alt="">
+  </div>
+  <div id="next-up-info">
+    <div id="next-up-label">UP NEXT</div>
+    <h2 id="next-up-title"></h2>
+    <p id="next-up-subtitle"></p>
+    <p id="next-up-summary"></p>
+    <div class="modal-actions">
+      <button class="hero-btn primary focusable" id="btn-next-play">▶ Play Now (<span id="next-up-counter">10</span>)</button>
+      <button class="hero-btn secondary focusable" id="btn-next-cancel">Cancel</button>
+    </div>
+  </div>
+  <div id="next-up-bar"><div id="next-up-bar-fill"></div></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SCREENSAVER
+═══════════════════════════════════════════════════ -->
+<div id="screensaver" class="hidden">
+  <div id="ss-backdrop"></div>
+  <div id="ss-gradient"></div>
+  <div id="ss-clock">--:--</div>
+  <div id="ss-meta">
+    <div id="ss-title"></div>
+    <div id="ss-year"></div>
+  </div>
+  <div id="ss-logo">
+    <svg viewBox="0 0 110 30" fill="none">
+      <circle cx="15" cy="15" r="12" fill="#e5a00d"/>
+      <text x="32" y="21" font-family="Arial" font-weight="700" font-size="16" fill="white">JELLYFIN</text>
+    </svg>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     NOTIFICATION TOAST
+═══════════════════════════════════════════════════ -->
+<div id="toast"></div>
+
+<!-- Connection status badge -->
+<!-- Starts in a neutral, hidden state: the socket has not reported either
+     way yet, and "Remote Disconnected" would otherwise flash red on every
+     page load. updateConnBadge() replaces the class on the first event. -->
+<div id="connection-status" class="conn-badge conn-pending">
+  <span class="conn-dot"></span><span class="conn-label"></span>
+</div>
+
+<script>
+  window.SOCKET_URL = window.location.origin;
+</script>
+<script src="{{ url_for('static', filename='js/tv.js') }}"></script>
+</body>
+</html>

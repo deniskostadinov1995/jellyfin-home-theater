@@ -1,0 +1,7 @@
+# Cached Jellyfin access token - contains a live credential
+.jellyfin_session.json
+
+# Local runtime files
+*.log
+__pycache__/
+*.pyc
