@@ -3,6 +3,13 @@
 Each section here becomes the notes of its GitHub release (build.py reads it),
 and the installed program shows them when an update is ready.
 
+## 1.0.2
+
+- Updates hand over faster and more cleanly: the old version now exits within
+  two seconds (it could linger while its tray icon shut down), and the new
+  version isn't started until the old one has let go of the app's port —
+  Windows otherwise lets both answer for a moment.
+
 ## 1.0.1
 
 - Fixed: restarting itself — after an update, or the remote's button starting

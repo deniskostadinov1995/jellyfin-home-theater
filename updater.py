@@ -349,16 +349,30 @@ class Updater:
             self._set(status="error", error=_short(exc))
             return False
         self._set(status="installing")
-        threading.Timer(1.5, self._exit_for_update).start()
+        timer = threading.Timer(1.5, self._exit_for_update)
+        timer.daemon = True
+        timer.start()
         return True
 
     def _exit_for_update(self):
-        for cb in list(self.before_exit):
-            try:
-                cb()
-            except Exception:
-                pass
-        logging.shutdown()
+        """Get out of the way fast: the installer waits for this process, and
+        the new version wants the same port. Clean-up gets two seconds, then
+        the process ends regardless — a tray icon or log handler that hangs
+        must not keep the old version alive next to the new one."""
+        def cleanup():
+            for cb in list(self.before_exit):
+                try:
+                    cb()
+                except Exception:
+                    pass
+            for h in logging.getLogger().handlers:
+                try:
+                    h.flush()
+                except Exception:
+                    pass
+        t = threading.Thread(target=cleanup, daemon=True, name="exitCleanup")
+        t.start()
+        t.join(2.0)
         os._exit(0)
 
     # ── background ───────────────────────────────────────────────────────────
@@ -574,6 +588,25 @@ def _start(exe, *args):
     return None
 
 
+def _wait_port_free(port, timeout=15):
+    """Wait until nothing listens on the app's port any more. Windows lets a
+    second server bind a port the first still holds, and both then answer —
+    so the old version must be completely gone before the new one starts.
+    Returns the pids still listening (empty when free)."""
+    import psutil
+    deadline = time.time() + timeout
+    while True:
+        try:
+            holders = {c.pid for c in psutil.net_connections(kind="tcp")
+                       if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port
+                       and c.pid}
+        except Exception:
+            return set()
+        if not holders or time.time() >= deadline:
+            return holders
+        time.sleep(0.5)
+
+
 def _healthy(port, version, timeout=HEALTH_TIMEOUT):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -648,6 +681,20 @@ def _apply_update(argv):
     if others:
         _ulog(f"stopping {len(others)} other process(es) running from the program folder")
         _stop(others)
+    holders = _wait_port_free(port)
+    ours = []
+    for pid in holders:
+        try:
+            proc = psutil.Process(pid)
+            if os.path.basename(proc.exe() or "").lower() == EXE_NAME.lower():
+                ours.append(proc)
+            else:
+                _ulog(f"port {port} is held by another program (pid {pid}, {proc.name()})")
+        except Exception:
+            continue
+    if ours:
+        _ulog(f"an old copy still holds port {port} (pid {[p.pid for p in ours]}) — stopping it")
+        _stop(ours)
 
     # 2. Swap the folders, keeping the old one until the new one proves itself.
     _rmtree(backup)
