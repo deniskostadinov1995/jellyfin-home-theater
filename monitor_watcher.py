@@ -102,6 +102,24 @@ _user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
 _user32.SetWindowPos.restype = wt.BOOL
 _user32.SetForegroundWindow.argtypes = [wt.HWND]
 _user32.SetForegroundWindow.restype = wt.BOOL
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = wt.HWND
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
+                ("dwFlags", wt.DWORD), ("time", wt.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _INPUT(ctypes.Structure):
+    # INPUT with only the mouse member of its union — the largest member, so
+    # the size is the one SendInput checks for (40 bytes on 64-bit).
+    _fields_ = [("type", wt.DWORD), ("mi", _MOUSEINPUT)]
+
+
+_user32.SendInput.argtypes = [wt.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+_user32.SendInput.restype = wt.UINT
 
 
 def _enum_display_monitors_raw():
@@ -359,6 +377,41 @@ class InputSourceDetector:
 
 # ── Win32 window mover ───────────────────────────────────────────────────
 
+def _window_owner(hwnd) -> str:
+    """Process name behind a window, for log messages."""
+    pid = wt.DWORD(0)
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    try:
+        import psutil
+        return psutil.Process(pid.value).name()
+    except Exception:
+        return f"pid {pid.value}"
+
+
+def _bring_to_front(hwnd) -> bool:
+    """Give a window the keyboard focus; returns whether it has it now.
+
+    Windows' foreground lock only lets the process that provided the last
+    input event move a window to the front — for any other process
+    SetForegroundWindow just flashes the taskbar button. The app never gets
+    input itself (the remote's button goes to the launcher, and switching the
+    TV on is no input to this PC at all), so the kiosk came up *behind*
+    whatever window had focus, and the remote's arrow keys went there instead
+    of to the TV UI. Sending an empty input event first (no movement, no
+    button — nothing happens) makes this process the last input provider,
+    which the lock accepts.
+    """
+    for attempt in range(3):
+        if _user32.GetForegroundWindow() == hwnd:
+            return True
+        if attempt:
+            time.sleep(0.25)
+        nudge = _INPUT(type=0)          # INPUT_MOUSE, all zero
+        _user32.SendInput(1, ctypes.byref(nudge), ctypes.sizeof(_INPUT))
+        _user32.SetForegroundWindow(hwnd)
+    return _user32.GetForegroundWindow() == hwnd
+
+
 def _force_window_to_monitor(pid: int, monitor: dict, timeout: float = 10.0):
     """Move/maximize Chrome's window on the right monitor (kiosk fix)."""
     user32 = _user32
@@ -408,7 +461,10 @@ def _force_window_to_monitor(pid: int, monitor: dict, timeout: float = 10.0):
     user32.SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW)
     time.sleep(0.15)
     user32.ShowWindow(hwnd, SW_MAXIMIZE)
-    user32.SetForegroundWindow(hwnd)
+    if not _bring_to_front(hwnd):
+        log.warning("Couldn't give the kiosk keyboard focus (%s has it) — the "
+                    "remote's keys go there until the TV UI is clicked.",
+                    _window_owner(user32.GetForegroundWindow()))
 
 
 # ── Chrome launcher ──────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ and release.py tags the GitHub release with it. Bump it (and add a section to
 CHANGELOG.md) for every release.
 """
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 APP_NAME = "Jellyfin Home Theater"
 EXE_NAME = "JellyfinHomeTheater.exe"

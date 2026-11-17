@@ -3,6 +3,14 @@
 Each section here becomes the notes of its GitHub release (build.py reads it),
 and the installed program shows them when an update is ready.
 
+## 1.0.3
+
+- The remote works on the TV screen right away: the TV UI now takes the
+  keyboard focus when it opens and whenever the remote's button asks for it.
+  Windows was refusing the app's request (only the program you last used may
+  bring a window to the front), so the remote's arrow keys went to whatever
+  window had focus — SignalRGB, for example — until the TV screen was clicked.
+
 ## 1.0.2
 
 - Updates hand over faster and more cleanly: the old version now exits within
