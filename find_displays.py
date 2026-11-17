@@ -43,17 +43,21 @@ def list_displays_win32():
             ("szDevice",  ctypes.c_wchar * 32),
         ]
 
+    from ctypes import wintypes as wt
+
     monitors = []
+    # Handle-sized parameters: HMONITOR/HDC are 64-bit on 64-bit Windows.
     MONITORENUMPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_long), ctypes.c_double,
-    )
-    user32 = ctypes.windll.user32
+        wt.BOOL, wt.HMONITOR, wt.HDC, ctypes.POINTER(RECT), wt.LPARAM)
+    user32 = ctypes.WinDLL("user32")
+    user32.EnumDisplayMonitors.argtypes = [wt.HDC, ctypes.POINTER(RECT),
+                                           MONITORENUMPROC, wt.LPARAM]
+    user32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.POINTER(MONITORINFOEX)]
 
     def _cb(hMon, _hdc, _lprc, _data):
         info = MONITORINFOEX()
         info.cbSize = ctypes.sizeof(MONITORINFOEX)
-        if user32.GetMonitorInfoW(hMon, ctypes.byref(info)):
+        if hMon and user32.GetMonitorInfoW(hMon, ctypes.byref(info)):
             r = info.rcMonitor
             monitors.append({
                 "name":       info.szDevice,
@@ -76,7 +80,7 @@ def list_displays_win32():
         print()
 
 
-if __name__ == "__main__":
+def main():
     print("=" * 50)
     print("  Jellyfin Home Theater — Connected Displays")
     print("=" * 50)
@@ -89,5 +93,11 @@ if __name__ == "__main__":
 
     print("─" * 50)
     print("Copy the Name into MONITOR_NAME in config.py.")
-    print('Example:  MONITOR_NAME = r"\\\\.\\ DISPLAY3"')
+    print(r'Example:  MONITOR_NAME = r"\\.\DISPLAY3"')
+    print("A TV usually drops out of this list while it is switched off —")
+    print("turn it on before running this.")
     print("─" * 50)
+
+
+if __name__ == "__main__":
+    main()

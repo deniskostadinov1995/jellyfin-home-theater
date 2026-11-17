@@ -1,6 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Jellyfin Home Theater — Configuration
 #  Edit this file with your Jellyfin server details.
+#
+#  The installed program keeps this file in
+#    %LOCALAPPDATA%\Jellyfin Home Theater\config.py
+#  (tray icon → Edit settings), and restarts to apply changes.  Running from
+#  source, copy config.example.py to config.py next to app.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Your Jellyfin server URL (default port is 8096).
@@ -10,10 +15,10 @@ JELLYFIN_URL = "http://localhost:8096"
 # watched checkmarks and resume positions, so use the account you actually
 # watch with.
 JELLYFIN_USER     = "Jellyfin"
-JELLYFIN_PASSWORD = "your-password"          # ← your Jellyfin password
+JELLYFIN_PASSWORD = "your-password"            # ← your Jellyfin password
 
 # Flask secret key — change this to any random string
-SECRET_KEY = "secret"
+SECRET_KEY = "change-me"
 
 # Port the app runs on
 PORT = 5050
@@ -41,7 +46,7 @@ MAX_STREAMING_BITRATE = 120_000_000
 #   Add-Type -AssemblyName System.Windows.Forms
 #   [System.Windows.Forms.Screen]::AllScreens | Select-Object DeviceName, Bounds, Primary
 #
-# Or just run:  python find_displays.py
+# Or just run:  python find_displays.py   (or: JellyfinHomeTheater.exe --find-displays)
 #
 # The name looks like:  \\.\DISPLAY3
 # Set to None to disable the watcher entirely.
@@ -140,9 +145,13 @@ YT_MAX_HEIGHT = 2160
 # Your WLED controllers on the LAN.  One address, or a list of them — the
 # Lights tab drives all of them together.  Set to None to hide the tab.
 #
-# To find them again if the addresses change (they are DHCP), run:
-#   python find_wled.py
-WLED_IP = []        # e.g. ["192.168.1.60", "192.168.1.61"] - run find_wled.py
+# Prefer the controllers' mDNS names (wled-xxxxxx.local) over IP addresses:
+# WLED boxes are usually on DHCP, and a .local name keeps working when the
+# router hands one a new address.  Plain IPs work too.
+#
+# To list your controllers and their names, run:
+#   python find_wled.py        (or: JellyfinHomeTheater.exe --find-wled)
+WLED_IP = []        # e.g. ["wled-1a2b3c.local", "192.168.1.61"]
 
 # How the Lights control treats SignalRGB.
 #
@@ -206,3 +215,26 @@ LIGHTS_AMBILIGHT_WHILE_PLAYING = True
 HA_PLAYING_PCT = 15    # dimmed, not off, so the room is still navigable
 HA_PAUSED_PCT  = 50    # up part-way when you pause
 HA_IDLE_PCT    = None  # None restores whatever they were before playback
+
+# ── Remote launcher (the button that turns everything on) ─────────────────────
+# A small listener runs at logon and starts the program — plus SignalRGB — when
+# you press a chosen button on the remote.  Pressed while the program is already
+# running, it brings the TV screen back up instead.
+#
+# The button's virtual-key code.  Find it with:
+#   JellyfinHomeTheater.exe --detect-button     (or: python remote_launcher.py --detect)
+# None disables the keyboard button.
+LAUNCH_KEY_VK = None          # e.g. 0x82 (F19)
+LAUNCH_KEY_MODS = []          # only for combos, e.g. ["ctrl", "alt"]
+
+# The remote's ON/OFF button is usually NOT a keyboard key: it sends a HID
+# "System Control" Sleep/Power on a separate "HID-compliant system controller"
+# interface, which Windows treats as the PC's sleep button.  Put the remote's
+# hardware id here (Device Manager → HID-compliant system controller → Details →
+# Hardware Ids) and the listener reacts to it instead.  ALSO set Windows' "When
+# I press the sleep button" to "Do nothing", or the PC sleeps as well.
+LAUNCH_POWER_DEVICE = ""      # e.g. "VID_248A&PID_168E"
+
+# SignalRGB is started with the program when it isn't already running.
+# "" = find it automatically; None = never start it.
+SIGNALRGB_EXE = ""

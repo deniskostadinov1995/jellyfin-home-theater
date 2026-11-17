@@ -48,6 +48,11 @@ Notes
   different button (or one with modifiers), or it'll fire while you type.
 • Activity is logged to  remote_launcher.log  next to this script.
 • If SignalRGB isn't found automatically, set SIGNALRGB_EXE below.
+• The remote's ON/OFF button is handled separately (SYSTEM_KEY_DEVICE below):
+  it isn't a keyboard key, so --detect can't see it. For it to launch the app
+  INSTEAD of sleeping the PC, set Windows' "When I press the sleep button" to
+  "Do nothing" (Control Panel > Power Options > Choose what the power buttons
+  do). That setting does not affect the PC's own power button.
 """
 
 import safe_console
@@ -56,44 +61,58 @@ safe_console.enable()   # arrows/emoji in output must not crash cp1252 consoles
 import os
 import sys
 import glob
+import json
 import time
 import socket
 import ctypes
 import threading
 import subprocess
+import urllib.request
 from ctypes import wintypes
 from datetime import datetime
 
+import paths
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  CONFIG  — edit these
+#  Settings — these live in config.py (LAUNCH_KEY_VK, LAUNCH_KEY_MODS,
+#  LAUNCH_POWER_DEVICE, SIGNALRGB_EXE), so the installed exe and a source
+#  checkout read the same file.  See config.example.py for what each one does.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The remote button's virtual-key code, from  --detect .  Examples:
 #   0xB3 = Play/Pause media   0xB0 = Next track   0x7C = F13   0xB6 = LaunchApp1
-HOTKEY_VK = 0x82
+# None: no keyboard button (the on/off button below can still launch).
+HOTKEY_VK = paths.setting("LAUNCH_KEY_VK", None)
 
-# Only needed if your button sends a COMBO. Most remote buttons don't — leave
-# empty. Otherwise list what --detect reported, e.g. ["ctrl", "alt"].
-HOTKEY_MODS = []
+# Only needed if your button sends a COMBO, e.g. ["ctrl", "alt"].
+HOTKEY_MODS = list(paths.setting("LAUNCH_KEY_MODS", []) or [])
 
-# Port the Jellyfin Home Theater server listens on (matches PORT in config.py).
-APP_PORT = 5050
+# Port the Jellyfin Home Theater server listens on.
+APP_PORT = int(paths.setting("PORT", 5050))
 
-# Folder containing app.py.  Defaults to this script's own folder.
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Folder containing app.py (source) or the program (exe).
+PROJECT_DIR = paths.APP_DIR
 
-# Leave blank to auto-detect SignalRGB.  Only set this if auto-detect fails —
-# point it at SignalRgb.exe or SignalRgbLauncher.exe.
-SIGNALRGB_EXE = ""
+# "" auto-detects SignalRGB; None never starts it; a path uses that file.
+SIGNALRGB_EXE = paths.setting("SIGNALRGB_EXE", "")
 
 # Ignore repeat presses within this many seconds (debounce).
 COOLDOWN_SECS = 3.0
+
+# The remote's ON/OFF button: a HID "System Control" Sleep/Power on its own
+# interface, watched on ONE device only (by hardware id) so a keyboard's sleep
+# key won't launch anything.  "" turns it off.  ALSO set Windows' sleep-button
+# action to "Do nothing", or the PC launches the app and then sleeps anyway.
+SYSTEM_KEY_DEVICE = paths.setting("LAUNCH_POWER_DEVICE", "") or ""
+
+# Which System Control usages count as the button: 0x81 Power Down, 0x82 Sleep.
+SYSTEM_KEY_USAGES = {0x81, 0x82}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Logging / helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-LOG_PATH = os.path.join(PROJECT_DIR, "remote_launcher.log")
+LOG_PATH = paths.LAUNCHER_LOG
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW — keep helper processes silent
 
 
@@ -122,13 +141,31 @@ def app_running():
         return s.connect_ex(("127.0.0.1", APP_PORT)) == 0
 
 
+def show_tv_ui():
+    """Ask the running app to put the TV UI up (reopen the kiosk if it was
+    closed, or bring it forward).  True if the app accepted the request."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{APP_PORT}/api/kiosk/show", data=b"{}",
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return bool(json.load(r).get("ok"))
+    except Exception:
+        return False        # older app, watcher disabled, or not answering
+
+
 def start_app():
-    app = os.path.join(PROJECT_DIR, "app.py")
-    if not os.path.exists(app):
-        log(f"ERROR: app.py not found in {PROJECT_DIR} — set PROJECT_DIR.")
-        return
+    if paths.FROZEN:
+        # The exe: the app is this same program, started without arguments.
+        cmd = [paths.EXE_PATH]
+    else:
+        app = os.path.join(PROJECT_DIR, "app.py")
+        if not os.path.exists(app):
+            log(f"ERROR: app.py not found in {PROJECT_DIR} — set PROJECT_DIR.")
+            return
+        cmd = [python_exe(), "app.py"]
     subprocess.Popen(
-        [python_exe(), "app.py"],
+        cmd,
         cwd=PROJECT_DIR,
         creationflags=_NO_WINDOW | subprocess.DETACHED_PROCESS,
         close_fds=True,
@@ -212,10 +249,16 @@ def start_signalrgb():
 # ── The action bound to the button ───────────────────────────────────────────
 def ensure_running():
     if app_running():
-        log("Jellyfin Home Theater already running — skipped")
+        # Running isn't the same as visible: the kiosk may have been closed.
+        if show_tv_ui():
+            log("Jellyfin Home Theater already running — asked it to show the TV UI")
+        else:
+            log("Jellyfin Home Theater already running — skipped")
     else:
         start_app()
 
+    if SIGNALRGB_EXE is None:
+        return                          # config says: never start SignalRGB
     if signalrgb_running():
         log("SignalRGB already running — skipped")
     else:
@@ -336,6 +379,193 @@ def _run_hook(on_keydown):
         user32.UnhookWindowsHookEx(hook)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  The remote's ON/OFF key (HID System Control), read straight from the device
+# ─────────────────────────────────────────────────────────────────────────────
+# The keyboard hook above only sees keyboard keys.  A remote's on/off button
+# arrives on a separate "HID-compliant system controller" interface (usage page
+# 0x01, usage 0x80) that Windows feeds to its sleep/power-button policy.
+#
+# Raw Input can NOT be used for it: Windows keeps System Control collections for
+# itself and never lists them in Raw Input (verified 2026-10-25 - not even the
+# Logitech receiver's shows up).  But the collection CAN be opened directly for
+# shared reading, and the HID class driver hands every input report to every
+# open reader, Windows' own included.  So a daemon thread opens it, blocks in
+# ReadFile, and decodes each report with the device's OWN descriptor
+# (HidP_GetUsages) rather than guessing from the bytes - remotes differ in
+# whether they prefix a report ID and in how they pack the bits.
+# The device is found by VID/PID on every (re)connect, so moving the receiver to
+# another USB port - which changes its instance path - doesn't break it.
+
+HIDP_INPUT = 0
+HIDP_STATUS_SUCCESS = 0x00110000
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ_WRITE = 0x3
+OPEN_EXISTING = 3
+_INVALID_HANDLE = wintypes.HANDLE(-1).value
+SYSTEM_USAGE_NAMES = {0x81: "Power", 0x82: "Sleep", 0x83: "Wake"}
+
+hid = ctypes.WinDLL("hid")
+cfgmgr32 = ctypes.WinDLL("cfgmgr32")
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+
+GUID_DEVINTERFACE_HID = _GUID(0x4D1E55B2, 0xF16F, 0x11CF,
+                              (ctypes.c_ubyte * 8)(0x88, 0xCB, 0x00, 0x11,
+                                                   0x11, 0x00, 0x00, 0x30))
+
+
+class HIDP_CAPS(ctypes.Structure):
+    _fields_ = [("Usage", wintypes.USHORT), ("UsagePage", wintypes.USHORT),
+                ("InputReportByteLength", wintypes.USHORT),
+                ("OutputReportByteLength", wintypes.USHORT),
+                ("FeatureReportByteLength", wintypes.USHORT),
+                ("Reserved", wintypes.USHORT * 17),
+                ("Counts", wintypes.USHORT * 10)]
+
+
+cfgmgr32.CM_Get_Device_Interface_List_SizeW.restype = wintypes.DWORD
+cfgmgr32.CM_Get_Device_Interface_List_SizeW.argtypes = [
+    ctypes.POINTER(wintypes.ULONG), ctypes.POINTER(_GUID), wintypes.LPCWSTR, wintypes.ULONG]
+cfgmgr32.CM_Get_Device_Interface_ListW.restype = wintypes.DWORD
+cfgmgr32.CM_Get_Device_Interface_ListW.argtypes = [
+    ctypes.POINTER(_GUID), wintypes.LPCWSTR, ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                 wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                 wintypes.HANDLE]
+kernel32.ReadFile.restype = wintypes.BOOL
+kernel32.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                              ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+hid.HidD_GetPreparsedData.restype = wintypes.BOOLEAN
+hid.HidD_GetPreparsedData.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_void_p)]
+hid.HidD_FreePreparsedData.argtypes = [ctypes.c_void_p]
+hid.HidP_GetCaps.restype = ctypes.c_long
+hid.HidP_GetCaps.argtypes = [ctypes.c_void_p, ctypes.POINTER(HIDP_CAPS)]
+hid.HidP_GetUsages.restype = ctypes.c_long
+hid.HidP_GetUsages.argtypes = [
+    ctypes.c_int, wintypes.USHORT, wintypes.USHORT,
+    ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.ULONG),
+    ctypes.c_void_p, ctypes.c_void_p, wintypes.ULONG]
+
+
+def _hid_interface_paths():
+    """Device paths of every present HID collection."""
+    n = wintypes.ULONG(0)
+    if cfgmgr32.CM_Get_Device_Interface_List_SizeW(
+            ctypes.byref(n), ctypes.byref(GUID_DEVINTERFACE_HID), None, 0) or not n.value:
+        return []
+    buf = ctypes.create_unicode_buffer(n.value)
+    if cfgmgr32.CM_Get_Device_Interface_ListW(
+            ctypes.byref(GUID_DEVINTERFACE_HID), None, buf, n.value, 0):
+        return []
+    return [p for p in ctypes.wstring_at(buf, n.value).split("\x00") if p]
+
+
+def _open_system_key(device_id):
+    """Open the System Control collection of the device whose path contains
+    device_id.  Returns (handle, preparsed, report_len, path) or None."""
+    want = device_id.upper()
+    for path in _hid_interface_paths():
+        if want not in path.upper():
+            continue
+        h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ_WRITE,
+                                 None, OPEN_EXISTING, 0, None)
+        if h in (None, _INVALID_HANDLE):
+            continue
+        pp = ctypes.c_void_p()
+        caps = HIDP_CAPS()
+        if (hid.HidD_GetPreparsedData(h, ctypes.byref(pp))
+                and hid.HidP_GetCaps(pp, ctypes.byref(caps)) == HIDP_STATUS_SUCCESS
+                and (caps.UsagePage, caps.Usage) == (0x01, 0x80)):
+            return h, pp, caps.InputReportByteLength, path
+        if pp:
+            hid.HidD_FreePreparsedData(pp)
+        kernel32.CloseHandle(h)
+    return None
+
+
+def _pressed_usages(report, preparsed):
+    """Generic Desktop usages currently down in this report, or None if the
+    descriptor couldn't decode it."""
+    if not preparsed or not report:
+        return None
+    usages = (wintypes.USHORT * 32)()
+    n = wintypes.ULONG(32)
+    rep = ctypes.create_string_buffer(report, len(report))
+    status = hid.HidP_GetUsages(HIDP_INPUT, 0x01, 0, usages, ctypes.byref(n),
+                                preparsed, rep, len(report))
+    if status != HIDP_STATUS_SUCCESS:
+        return None
+    return [usages[i] for i in range(n.value)]
+
+
+def _system_key_reader(on_press):
+    """Read the remote's System Control reports forever, reconnecting whenever
+    the receiver is unplugged or the handle dies (e.g. across sleep)."""
+    lost = False                       # log "not found" once, not every retry
+    while True:
+        found = _open_system_key(SYSTEM_KEY_DEVICE)
+        if not found:
+            if not lost:
+                log(f"Remote's on/off interface not found ({SYSTEM_KEY_DEVICE}) — "
+                    "is the receiver plugged in? Still looking.")
+                lost = True
+            time.sleep(5)
+            continue
+        h, pp, rlen, path = found
+        if lost:
+            log("Remote's on/off interface is back — watching it again")
+        lost = False
+        buf = ctypes.create_string_buffer(rlen)
+        got = wintypes.DWORD(0)
+        try:
+            while True:
+                if not kernel32.ReadFile(h, buf, rlen, ctypes.byref(got), None):
+                    err = ctypes.get_last_error()
+                    log(f"Remote's on/off interface went away (error {err}) — reconnecting")
+                    lost = True
+                    break
+                rep = buf.raw[:got.value]
+                usages = _pressed_usages(rep, pp)
+                if usages is None:
+                    # Descriptor wouldn't decode it: fall back on "any non-zero
+                    # data byte after the report ID".
+                    if any(rep[1:]):
+                        on_press(f"on/off, undecoded {rep.hex(' ')}")
+                    continue
+                hits = [u for u in usages if u in SYSTEM_KEY_USAGES]
+                if hits:
+                    on_press("+".join(SYSTEM_USAGE_NAMES.get(u, f"0x{u:02X}")
+                                      for u in hits))
+        except Exception as e:
+            log(f"system-key reader error: {e}")
+        finally:
+            hid.HidD_FreePreparsedData(pp)
+            kernel32.CloseHandle(h)
+        time.sleep(2)
+
+
+def _start_system_key_listener(on_press):
+    """Start the background reader; raises OSError if the device isn't there,
+    so the caller can say so at startup (the reader keeps retrying anyway)."""
+    probe = _open_system_key(SYSTEM_KEY_DEVICE)
+    if probe:
+        h, pp, _, _ = probe
+        hid.HidD_FreePreparsedData(pp)
+        kernel32.CloseHandle(h)
+    threading.Thread(target=_system_key_reader, args=(on_press,),
+                     name="system-key-reader", daemon=True).start()
+    if not probe:
+        raise OSError(f"no System Control interface found for {SYSTEM_KEY_DEVICE} "
+                      "yet (receiver unplugged?) — will keep looking")
+
+
 # ── Modes ────────────────────────────────────────────────────────────────────
 def detect_mode():
     print("Press your remote button once…  (Ctrl+C to cancel)\n")
@@ -357,9 +587,9 @@ def detect_mode():
     print(f'HOTKEY_VK = 0x{vk:02X}      # {name}     '
           f'(modifiers: {", ".join(mods) if mods else "none"})')
     print(f"   scan code: 0x{found['scan']:02X}")
-    print("\nPut that HOTKEY_VK value near the top of remote_launcher.py.")
+    print("\nPut that value in config.py as  LAUNCH_KEY_VK = 0x%02X" % vk)
     if mods:
-        print(f'Also set  HOTKEY_MODS = {mods}')
+        print(f'Also set  LAUNCH_KEY_MODS = {mods}')
     elif 0x30 <= vk <= 0x5A:
         print("⚠ That's a normal letter/number key — it will fire whenever you "
               "type it. Pick a dedicated remote button, or add modifiers.")
@@ -376,24 +606,48 @@ def listen_mode():
 
     last = [0.0]
 
+    def fire(what):
+        now = time.time()
+        if now - last[0] < COOLDOWN_SECS:
+            return
+        last[0] = now
+        log(f"Button pressed ({what}) — checking apps…")
+        # Do the launching off the hook thread so the callback returns instantly
+        # (a slow low-level hook callback gets silently removed by Windows).
+        threading.Thread(target=ensure_running, daemon=True).start()
+
     def on_key(vk, scan, mods):
         if vk != HOTKEY_VK:
             return
         if HOTKEY_MODS and not all(m in mods for m in HOTKEY_MODS):
             return
-        now = time.time()
-        if now - last[0] < COOLDOWN_SECS:
-            return
-        last[0] = now
-        log(f"Button pressed (vk=0x{vk:02X}) — checking apps…")
-        # Do the launching off the hook thread so the callback returns instantly
-        # (a slow low-level hook callback gets silently removed by Windows).
-        threading.Thread(target=ensure_running, daemon=True).start()
+        fire(f"vk=0x{vk:02X}")
 
-    name = VK_NAMES.get(HOTKEY_VK, f"0x{HOTKEY_VK:02X}")
-    mod_txt = ("+".join(HOTKEY_MODS) + "+") if HOTKEY_MODS else ""
-    log(f"Watching for remote button: {mod_txt}{name}  (Ctrl+C to stop)")
-    _run_hook(on_key)
+    if HOTKEY_VK is None and not SYSTEM_KEY_DEVICE:
+        log("No launch button configured (LAUNCH_KEY_VK / LAUNCH_POWER_DEVICE "
+            "in config.py) — nothing to listen for.")
+        return
+    if HOTKEY_VK is not None:
+        name = VK_NAMES.get(HOTKEY_VK, f"0x{HOTKEY_VK:02X}")
+        mod_txt = ("+".join(HOTKEY_MODS) + "+") if HOTKEY_MODS else ""
+        log(f"Watching for remote button: {mod_txt}{name}  (Ctrl+C to stop)")
+    if SYSTEM_KEY_DEVICE:
+        try:
+            _start_system_key_listener(fire)
+            keys = "/".join(SYSTEM_USAGE_NAMES.get(u, f"0x{u:02X}")
+                            for u in sorted(SYSTEM_KEY_USAGES))
+            log(f"Also watching the remote's on/off key: {keys} from {SYSTEM_KEY_DEVICE}")
+        except OSError as e:
+            log(f"Could not watch the remote's on/off key: {e}")
+    if HOTKEY_VK is not None:
+        _run_hook(on_key)
+    else:
+        # Only the on/off button: its reader is a thread, so just stay alive.
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
     log("Stopped.")
 
 

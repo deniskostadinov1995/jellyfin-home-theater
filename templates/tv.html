@@ -34,6 +34,7 @@
     <div class="sb-item" data-sb="search"><span class="sb-icon">🔍</span><span class="sb-label">Search</span></div>
     <div class="sb-item" data-sb="home"><span class="sb-icon">🏠</span><span class="sb-label">Home</span></div>
     <div class="sb-item" data-sb="youtube"><span class="sb-icon sb-yt">▶</span><span class="sb-label">YouTube</span></div>
+    <div class="sb-item" data-sb="settings"><span class="sb-icon">⚙</span><span class="sb-label">Settings</span></div>
     <div class="sb-sep"></div>
     <div id="sb-libraries"></div>
   </div>
@@ -142,6 +143,30 @@
     <div id="yt-right">
       <h2 class="row-title" id="yt-results-title">Recently Watched</h2>
       <div id="yt-results" class="yt-grid"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SETTINGS SCREEN (version + updates)
+═══════════════════════════════════════════════════ -->
+<div id="screen-settings" class="screen hidden">
+  <div class="screen-header">
+    <button class="back-btn focusable" id="settings-back-btn">← Back</button>
+    <h1>Settings</h1>
+  </div>
+  <div id="settings-body">
+    <div class="settings-card">
+      <h2>Jellyfin Home Theater <span id="set-version" class="settings-version"></span></h2>
+      <p class="settings-status" id="set-status">Checking…</p>
+      <p class="settings-notes" id="set-notes"></p>
+      <div class="settings-actions">
+        <button class="hero-btn primary focusable" id="btn-set-check">⟳ Check for updates</button>
+        <button class="hero-btn primary focusable hidden" id="btn-set-install">⬇ Install update</button>
+        <button class="hero-btn secondary focusable" id="btn-set-auto">Automatic updates: On</button>
+      </div>
+      <p class="settings-dim" id="set-auto-hint">Automatic updates install only when nothing is playing and the TV has been idle for a while.</p>
+      <p class="settings-dim" id="set-ytdlp"></p>
     </div>
   </div>
 </div>
@@ -362,6 +387,9 @@
 
 <script>
   window.SOCKET_URL = window.location.origin;
+  // The version that served this page — compared with the server's after an
+  // update, so a TV left open reloads itself onto the new version.
+  window.APP_VERSION = "{{ version }}";
 </script>
 <script src="{{ url_for('static', filename='js/tv.js') }}"></script>
 </body>

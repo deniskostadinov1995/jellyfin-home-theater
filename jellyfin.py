@@ -459,7 +459,12 @@ def to_item(j):
         "parentIndex":   j.get("ParentIndexNumber"),
         "viewOffset":    ticks_to_ms(ud.get("PlaybackPositionTicks")),
         "viewCount":     ud.get("PlayCount") or (1 if ud.get("Played") else 0),
-        "thumb":         image_path(item_id, "Primary", tag=tags.get("Primary")),
+        # Only when the item really has a poster. Asking Jellyfin for one that
+        # doesn't exist costs a 404 round trip per card, and an empty value is
+        # what lets the TV fall back to the show's poster (seasons) or a
+        # titled placeholder.
+        "thumb":         (image_path(item_id, "Primary", tag=tags["Primary"])
+                          if tags.get("Primary") else ""),
         "art":           "",
         "mediaSourceCount": j.get("MediaSourceCount") or 0,
     }
@@ -615,14 +620,26 @@ def source_label(source):
     return " · ".join(b for b in bits if b)
 
 
-def source_quality(source):
-    """The badge the player shows: resolution, codecs, container, bitrate."""
+def source_quality(source, audio_index=None):
+    """The badge the player shows: resolution, codecs, container, bitrate.
+
+    The audio fields describe the track that will actually be heard — the one
+    picked (else Jellyfin's default for this user), not merely the first one
+    in the file.  `audioIsFirst` matters for Direct Play: a browser playing
+    the raw file can only ever play the file's first audio track, so any other
+    choice has to go through Direct Stream, where Jellyfin selects the track.
+    """
     v = video_stream(source)
-    audio = next((s for s in source.get("MediaStreams") or []
-                  if s.get("Type") == "Audio"), {})
+    audios = [s for s in source.get("MediaStreams") or [] if s.get("Type") == "Audio"]
+    if audio_index is None:
+        audio_index = source.get("DefaultAudioStreamIndex")
+    audio = next((s for s in audios if s.get("Index") == audio_index), None)
+    if audio is None:
+        audio = audios[0] if audios else {}
     return {
         "videoCodec":  (v.get("Codec") or "?").upper(),
         "audioCodec":  (audio.get("Codec") or "?").upper(),
+        "audioIsFirst": not audios or audio is audios[0],
         # HDR / SDR. The player needs this to tell a genuine copy variant from
         # a tone-mapped one when it picks an HLS rung.
         "videoRange":  (v.get("VideoRange") or "").upper(),

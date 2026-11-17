@@ -87,6 +87,13 @@ function updateState(state) {
   }
 }
 
+// Device and light names come from the network — treat them as text.
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function formatTime(ms) {
   if (!ms || isNaN(ms)) return '0:00';
   const s = Math.floor(ms / 1000);
@@ -320,7 +327,7 @@ function renderLights(st) {
     const row = document.createElement('div');
     row.className = 'wled-device';
     if (d.error) {
-      row.innerHTML = `<span class="wled-dev-name">${d.name}</span>` +
+      row.innerHTML = `<span class="wled-dev-name">${esc(d.name)}</span>` +
                       `<span class="wled-dev-meta">unreachable</span>`;
     } else {
       // Strips report their LED count; ceiling lights report a level.
@@ -328,8 +335,8 @@ function renderLights(st) {
         ? (d.on ? `${Math.round((d.bri || 0) / 255 * 100)}%` : 'off')
         : `${d.leds || '?'} LEDs${d.live ? ' · live' : ''}`;
       row.innerHTML =
-        `<span class="wled-dev-name">${d.name}</span>` +
-        `<span class="wled-dev-meta">${meta}</span>`;
+        `<span class="wled-dev-name">${esc(d.name)}</span>` +
+        `<span class="wled-dev-meta">${esc(meta)}</span>`;
       const btn = document.createElement('button');
       btn.className = 'pill-btn tiny' + (d.on ? ' active' : '');
       btn.textContent = d.on ? 'On' : 'Off';
@@ -412,3 +419,76 @@ initLights();
 setInterval(() => {
   if (socket.connected) socket.emit('ping_check');
 }, 10000);
+
+// ── App (version + updates) ──────────────────────────────────────────────
+let appState = null;
+
+function appStatusText(st) {
+  switch (st.status) {
+    case 'disabled':    return 'Running from source — updates apply to the installed program.';
+    case 'checking':    return 'Checking for updates…';
+    case 'downloading': return `Downloading ${st.latest}… ${st.progress || 0}%`;
+    case 'ready':       return `Version ${st.latest} is ready to install.`;
+    case 'installing':  return `Installing ${st.latest} — back in a moment…`;
+    case 'up-to-date':  return 'You have the latest version.';
+    case 'error':       return `Couldn't check for updates: ${st.error || 'unknown error'}`;
+    default:            return 'Not checked yet.';
+  }
+}
+
+async function refreshApp() {
+  try {
+    appState = await (await fetch('/api/update/status')).json();
+  } catch (_) { return; }
+  const st = appState;
+  const busy = ['checking', 'downloading', 'installing'].includes(st.status);
+  document.getElementById('app-version').textContent = st.version;
+  document.getElementById('app-status').textContent = appStatusText(st);
+  document.getElementById('app-notes').textContent =
+    st.status === 'ready' && st.notes ? st.notes : '';
+  document.getElementById('app-ytdlp').textContent =
+    st.ytDlp ? `YouTube engine (yt-dlp) ${st.ytDlp}` : '';
+  const check = document.getElementById('app-check');
+  check.disabled = !st.enabled || busy;
+  const install = document.getElementById('app-install');
+  install.classList.toggle('hidden', st.status !== 'ready');
+  if (st.status === 'ready') install.textContent = `⬇ Install ${st.latest}`;
+  const auto = document.getElementById('app-auto');
+  auto.textContent = st.autoUpdate ? 'On' : 'Off';
+  auto.classList.toggle('active', !!st.autoUpdate);
+  auto.disabled = !st.enabled;
+}
+
+async function appPost(path, body) {
+  try {
+    await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (navigator.vibrate) navigator.vibrate(30);
+  } catch (_) {}
+  refreshApp();
+}
+
+document.getElementById('app-check').addEventListener('click', () => appPost('/api/update/check'));
+document.getElementById('app-install').addEventListener('click', () => appPost('/api/update/install'));
+document.getElementById('app-auto').addEventListener('click', () =>
+  appPost('/api/update/auto', { enabled: !(appState && appState.autoUpdate) }));
+
+setInterval(() => {
+  const tab = document.getElementById('tab-app');
+  if (tab && !tab.classList.contains('hidden')) refreshApp();
+}, 2500);
+refreshApp();
+
+// After an update the server comes back as a new version: this page is then
+// stale, so load the new one.
+socket.on('connect', async () => {
+  try {
+    const st = await (await fetch('/api/update/status')).json();
+    if (window.APP_VERSION && st.version && st.version !== window.APP_VERSION) {
+      location.reload();
+    }
+  } catch (_) {}
+});

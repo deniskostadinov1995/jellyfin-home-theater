@@ -1173,3 +1173,26 @@ body.sidebar-open #sidebar-scrim { opacity: 1; }
   align-self: center; opacity: 0.7;
 }
 body.sidebar-open .topbar-hint { opacity: 0; }
+
+/* ── Settings (version + updates) ───────────────────────────────────────── */
+#settings-body { padding: 8px var(--safe) 48px; }
+.settings-card {
+  max-width: 760px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 16px;
+  padding: 32px 36px;
+}
+.settings-card h2 { font-size: 26px; font-weight: 800; margin-bottom: 12px; }
+.settings-version { color: var(--accent); font-weight: 700; margin-left: 8px; }
+.settings-status { font-size: 18px; margin-bottom: 8px; }
+.settings-notes {
+  color: #bbb; font-size: 14px; white-space: pre-line;
+  margin-bottom: 8px; max-height: 8em; overflow: hidden;
+}
+.settings-actions {
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: 12px; margin: 22px 0 18px;
+}
+.settings-actions .hero-btn:disabled { opacity: 0.45; cursor: default; }
+.settings-dim { color: #888; font-size: 13px; margin-top: 6px; }

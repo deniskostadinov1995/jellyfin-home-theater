@@ -48,6 +48,7 @@
   <button class="tab" data-tab="media">⏯ Playback</button>
   <button class="tab" data-tab="volume">🔊 Volume</button>
   <button class="tab" data-tab="lights">💡 Lights</button>
+  <button class="tab" data-tab="app">⚙ App</button>
 </div>
 
 <!-- ═══════════════════════════════════════
@@ -195,6 +196,28 @@
   </div>
 </div>
 
+<!-- ═══════════════════════════════════════
+     TAB: APP (version + updates)
+═══════════════════════════════════════ -->
+<div id="tab-app" class="tab-content hidden">
+  <div class="app-card">
+    <div class="app-title">Jellyfin Home Theater <span id="app-version" class="app-version"></span></div>
+    <p id="app-status" class="lights-hint"></p>
+    <p id="app-notes" class="app-notes"></p>
+    <div class="action-row">
+      <button class="pill-btn" id="app-check">⟳ Check for updates</button>
+      <button class="pill-btn hidden" id="app-install">⬇ Install</button>
+    </div>
+    <div class="wled-device">
+      <span class="wled-dev-name">Update automatically</span>
+      <span class="wled-dev-meta">only while idle</span>
+      <button class="pill-btn tiny" id="app-auto">On</button>
+    </div>
+    <p id="app-ytdlp" class="lights-hint"></p>
+  </div>
+</div>
+
+<script>window.APP_VERSION = "{{ version }}";</script>
 <script src="{{ url_for('static', filename='js/remote.js') }}"></script>
 </body>
 </html>

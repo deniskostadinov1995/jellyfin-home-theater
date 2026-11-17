@@ -78,6 +78,7 @@ class HomeAssistantClient:
             if not entity_id.startswith("light."):
                 continue
             attrs = s.get("attributes") or {}
+            modes = attrs.get("supported_color_modes") or []
             out.append({
                 "entity_id":  entity_id,
                 "name":       attrs.get("friendly_name") or entity_id,
@@ -86,7 +87,10 @@ class HomeAssistantClient:
                 "brightness": attrs.get("brightness"),
                 # Not every light dims; turning brightness on a switch-like
                 # light is harmless but pointless, and worth knowing about.
-                "dimmable":   "brightness" in (attrs.get("supported_color_modes") or [])
+                # Every colour mode except "onoff" implies brightness — a
+                # colour or white-temperature bulb lists "hs"/"color_temp",
+                # not "brightness", and is just as dimmable.
+                "dimmable":   any(m != "onoff" for m in modes)
                               or attrs.get("brightness") is not None,
             })
         out.sort(key=lambda e: e["name"].lower())

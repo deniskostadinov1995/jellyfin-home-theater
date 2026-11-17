@@ -1,7 +1,21 @@
-# Cached Jellyfin access token - contains a live credential
+# Your settings: they hold your Jellyfin password. Start from config.example.py.
+config.py
+# Cached Jellyfin access token — contains a live credential
 .jellyfin_session.json
+settings.json
 
-# Local runtime files
+# Logs and runtime files
 *.log
+*.log.*
 __pycache__/
 *.pyc
+
+# Build output (python build.py)
+build/
+dist/
+release/
+
+# Local backups and editor/agent tooling
+.backup-*/
+*.bak-*
+.claude/

@@ -296,3 +296,10 @@ html, body {
   flex: 0 0 auto; padding: 8px 18px; font-size: 13px; border-radius: 16px;
 }
 .pill-btn.tiny.active { border-color: var(--accent); color: var(--accent); }
+
+/* ── App tab (version + updates) ───────────────────────────────────────── */
+.app-card { padding: 4px 2px; }
+.app-title { font-size: 17px; font-weight: 700; margin: 8px 0 4px; }
+.app-version { color: var(--accent); margin-left: 6px; }
+.app-notes { color: var(--text-muted); font-size: 13px; white-space: pre-line; margin: 0 0 8px; }
+.pill-btn:disabled { opacity: 0.45; }

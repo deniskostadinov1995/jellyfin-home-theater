@@ -44,6 +44,29 @@ def probe(ip, timeout=1.2):
     return None
 
 
+def mdns_name(ip, timeout=2.0):
+    """The controller's mDNS hostname (e.g. "wled-1a2b3c.local"), or None.
+
+    Worth preferring over the IP: WLED boxes sit on DHCP, and a .local name
+    keeps working when the router hands out a different address.
+    """
+    try:
+        with urllib.request.urlopen(f"http://{ip}/json/cfg", timeout=timeout) as r:
+            name = ((json.load(r).get("id") or {}).get("mdns") or "").strip()
+    except Exception:
+        return None
+    if not name:
+        return None
+    host = f"{name}.local"
+    try:
+        # Only recommend it if this PC can actually resolve it.
+        if socket.gethostbyname(host) == ip:
+            return host
+    except OSError:
+        pass
+    return None
+
+
 def main():
     subnet = sys.argv[1] if len(sys.argv) > 1 else local_subnet()
     print(f"Scanning {subnet}.1-254 for WLED controllers…\n")
@@ -69,9 +92,17 @@ def main():
         print(f"  {ip:<16} {info.get('name', '?'):<22} "
               f"WLED {info.get('ver', '?')}, {leds.get('count', '?')} LEDs{live}")
 
+    names = [mdns_name(ip) for ip, _ in found]
     addresses = ", ".join(f'"{ip}"' for ip, _ in found)
-    print("\nPaste this into config.py:\n")
-    print(f"WLED_IP = [{addresses}]")
+    if all(names):
+        hosts = ", ".join(f'"{n}"' for n in names)
+        print("\nPaste this into config.py (mDNS names survive DHCP address changes):\n")
+        print(f"WLED_IP = [{hosts}]")
+        print("\nor, by IP address:\n")
+        print(f"WLED_IP = [{addresses}]")
+    else:
+        print("\nPaste this into config.py:\n")
+        print(f"WLED_IP = [{addresses}]")
 
 
 if __name__ == "__main__":

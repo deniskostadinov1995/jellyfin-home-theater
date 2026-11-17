@@ -74,21 +74,45 @@ class _MONITORINFOEX(ctypes.Structure):
     ]
 
 
+# A private user32 handle, so the argtypes below can't leak into anything else
+# in the process — screeninfo calls the same functions through the shared
+# ctypes.windll.user32 with callback types of its own, and would break.
+# Declaring argtypes at all is what keeps 64-bit handles from being truncated.
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+MONITORENUMPROC = ctypes.WINFUNCTYPE(
+    wt.BOOL, wt.HMONITOR, wt.HDC, ctypes.POINTER(_RECT), wt.LPARAM)
+WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+_user32.EnumDisplayMonitors.argtypes = [wt.HDC, ctypes.POINTER(_RECT),
+                                        MONITORENUMPROC, wt.LPARAM]
+_user32.EnumDisplayMonitors.restype = wt.BOOL
+_user32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.POINTER(_MONITORINFOEX)]
+_user32.GetMonitorInfoW.restype = wt.BOOL
+_user32.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
+_user32.EnumWindows.restype = wt.BOOL
+_user32.IsWindowVisible.argtypes = [wt.HWND]
+_user32.IsWindowVisible.restype = wt.BOOL
+_user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wt.DWORD
+_user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+_user32.ShowWindow.restype = wt.BOOL
+_user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_int, wt.UINT]
+_user32.SetWindowPos.restype = wt.BOOL
+_user32.SetForegroundWindow.argtypes = [wt.HWND]
+_user32.SetForegroundWindow.restype = wt.BOOL
+
+
 def _enum_display_monitors_raw():
     """Yield (hMonitor, info_dict) tuples for every connected display."""
     out = []
-
-    MONITORENUMPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_long), ctypes.c_double,
-    )
-
-    user32 = ctypes.windll.user32
+    user32 = _user32
 
     def _cb(hMon, _hdc, _lprc, _data):
         info = _MONITORINFOEX()
         info.cbSize = ctypes.sizeof(_MONITORINFOEX)
-        if user32.GetMonitorInfoW(hMon, ctypes.byref(info)):
+        if hMon and user32.GetMonitorInfoW(hMon, ctypes.byref(info)):
             r = info.rcMonitor
             out.append((hMon, {
                 "name":       info.szDevice,
@@ -337,34 +361,30 @@ class InputSourceDetector:
 
 def _force_window_to_monitor(pid: int, monitor: dict, timeout: float = 10.0):
     """Move/maximize Chrome's window on the right monitor (kiosk fix)."""
-    user32 = ctypes.windll.user32
+    user32 = _user32
 
     SW_RESTORE   = 9
     SW_MAXIMIZE  = 3
-    HWND_TOP     = 0
+    HWND_TOP     = None
     SWP_SHOWWINDOW = 0x0040
-
-    WNDENUMPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong
-    )
 
     deadline = time.monotonic() + timeout
 
     def _find_hwnd():
-        result = ctypes.c_ulong(0)
+        result = {"hwnd": None}
 
         def _cb(hwnd, _):
-            if not user32.IsWindowVisible(hwnd):
+            if not hwnd or not user32.IsWindowVisible(hwnd):
                 return True
-            win_pid = ctypes.c_ulong(0)
+            win_pid = wt.DWORD(0)
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
             if win_pid.value == pid:
-                result.value = hwnd
+                result["hwnd"] = hwnd
                 return False
             return True
 
         user32.EnumWindows(WNDENUMPROC(_cb), 0)
-        return result.value or None
+        return result["hwnd"]
 
     hwnd = None
     while time.monotonic() < deadline:
@@ -393,9 +413,67 @@ def _force_window_to_monitor(pid: int, monitor: dict, timeout: float = 10.0):
 
 # ── Chrome launcher ──────────────────────────────────────────────────────
 
+def _profile_dir() -> str:
+    return os.path.join(os.environ.get("TEMP", "C:\\Temp"), "JellyfinKioskProfile")
+
+
+class _AdoptedKiosk:
+    """A kiosk Chrome left running by an earlier run of the app, wrapped to
+    look like the Popen the watcher normally holds (pid / poll / terminate)."""
+
+    def __init__(self, proc):
+        self._proc = proc
+        self.pid = proc.pid
+
+    def poll(self):
+        try:
+            import psutil
+            if self._proc.is_running() and self._proc.status() != psutil.STATUS_ZOMBIE:
+                return None
+        except Exception:
+            pass
+        return 0
+
+    def terminate(self):
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+
+
+def _find_existing_kiosk():
+    """The kiosk's browser process from a previous run, if one is still open.
+
+    The app restarts itself to install an update (and can be restarted from
+    the tray). The kiosk window survives that, and launching another one with
+    the same profile only opens a second window in the existing Chrome — so
+    the new run takes over the old window instead; the TV page reconnects on
+    its own and reloads if the version changed.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    want = os.path.normcase(_profile_dir())
+    for p in psutil.process_iter(["name", "cmdline"]):
+        try:
+            if (p.info.get("name") or "").lower() != "chrome.exe":
+                continue
+            cmd = p.info.get("cmdline") or []
+            if any(a.startswith("--type=") for a in cmd):
+                continue                    # renderer / GPU / utility children
+            for a in cmd:
+                if (a.lower().startswith("--user-data-dir=")
+                        and os.path.normcase(a.split("=", 1)[1].strip('"')) == want):
+                    return _AdoptedKiosk(p)
+        except Exception:
+            continue
+    return None
+
+
 def _launch_chrome(monitor: dict, port: int, chrome_path: str) -> Optional[subprocess.Popen]:
     url         = f"http://localhost:{port}/tv"
-    profile_dir = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "JellyfinKioskProfile")
+    profile_dir = _profile_dir()
 
     cmd = [
         chrome_path,
@@ -471,6 +549,28 @@ def _kill_chrome(proc: Optional[subprocess.Popen]):
 
 # ── Public API ───────────────────────────────────────────────────────────
 
+# Set by request_kiosk(); the watcher loop waits on it instead of sleeping, so
+# a request is acted on immediately rather than at the next poll.
+_kiosk_request = threading.Event()
+_watcher_running = {"on": False}
+
+
+def request_kiosk() -> bool:
+    """Ask the watcher to put the TV UI up now.
+
+    For the remote's power button when the app is already running: if the
+    kiosk window was closed (Alt+F4, a Chrome crash) it is reopened, and if it
+    is open it is brought back to the front.  Nothing happens while the TV is
+    not the active display — the watcher's normal rules still decide that.
+
+    Returns False when no watcher is running in this process.
+    """
+    if not _watcher_running["on"]:
+        return False
+    _kiosk_request.set()
+    return True
+
+
 def start_monitor_watcher(
     target_name: str,
     chrome_path: str,
@@ -521,8 +621,14 @@ def start_monitor_watcher(
 
     def _watch():
         nonlocal expected_input_vcp
-        was_active  = False
-        chrome_proc: Optional[subprocess.Popen] = None
+        # A kiosk left open by the previous run (an update or a restart) is
+        # adopted rather than duplicated. If the display has gone inactive
+        # since, the first poll closes it as usual.
+        chrome_proc = _find_existing_kiosk()
+        was_active  = chrome_proc is not None
+        if chrome_proc is not None:
+            log.info("Took over the kiosk window left open by the previous run (pid %d).",
+                     chrome_proc.pid)
         detector = InputSourceDetector(expected_input_vcp=expected_input_vcp)
         warned_no_ddc = False   # only nag about a fully-unresponsive TV once
         misses = {"input": 0, "power": 0, "input_known": 0}
@@ -621,6 +727,8 @@ def start_monitor_watcher(
             return True, "display connected (DDC/CI unavailable)"
 
         while True:
+            requested = _kiosk_request.is_set()
+            _kiosk_request.clear()
             try:
                 hMon, monitor = _find_target_hmon(target_name)
                 connected = monitor is not None
@@ -643,13 +751,33 @@ def start_monitor_watcher(
                     _kill_chrome(chrome_proc)
                     chrome_proc = None
 
+                elif requested and is_active and monitor:
+                    # Asked for the TV UI while the display was already
+                    # active. The watcher only launches on the inactive →
+                    # active edge, so a kiosk that had been closed stayed
+                    # closed until the TV was switched off and on again.
+                    if chrome_proc is None or chrome_proc.poll() is not None:
+                        log.info("TV UI requested — reopening the kiosk.")
+                        chrome_proc = _launch_chrome(monitor, port, chrome_path)
+                    else:
+                        log.info("TV UI requested — bringing the kiosk forward.")
+                        threading.Thread(
+                            target=_force_window_to_monitor,
+                            args=(chrome_proc.pid, monitor, 2.0),
+                            daemon=True, name="ChromeReposition").start()
+
+                elif requested:
+                    log.info("TV UI requested, but the display is not active (%s).",
+                             reason)
+
                 was_active = is_active
 
             except Exception as exc:
                 log.error("Watcher loop error: %s", exc)
 
-            time.sleep(poll_interval)
+            _kiosk_request.wait(poll_interval)
 
+    _watcher_running["on"] = True
     thread = threading.Thread(target=_watch, daemon=True, name="MonitorWatcher")
     thread.start()
     return thread

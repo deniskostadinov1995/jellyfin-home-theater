@@ -30,8 +30,13 @@ from urllib.parse import urlencode, parse_qsl
 import jellyfin
 from jellyfin import JellyfinClient, JellyfinError, ms_to_ticks
 from homeassistant import HomeAssistantClient, HomeAssistantError, pct_to_255
+import paths
+from version import __version__
 
 # ── Load config ──────────────────────────────────────────────────────────────
+# From source this is the project's config.py; the installed exe reads the copy
+# in %LOCALAPPDATA%\Jellyfin Home Theater (see paths.load_config).
+paths.load_config()
 try:
     from config import (
         JELLYFIN_URL, JELLYFIN_USER, JELLYFIN_PASSWORD, SECRET_KEY, PORT,
@@ -64,14 +69,87 @@ try:
 except ImportError:
     MAX_STREAMING_BITRATE = 120_000_000
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+LOG_PATH = paths.LOG_PATH
+
+
+class _ConsoleToLog:
+    """Stands in for stdout/stderr when there is no console at all.
+
+    remote_launcher.py starts the app with pythonw, where sys.stdout and
+    sys.stderr are None: every print() vanished, and so did the traceback of
+    any thread that crashed. This forwards whole lines to the log instead.
+    """
+
+    def __init__(self, level):
+        self._log = logging.getLogger("console")
+        self._level = level
+        self._buf = ""
+        self._lock = threading.Lock()
+        self._busy = threading.local()
+
+    def write(self, text):
+        if getattr(self._busy, "on", False):
+            return len(text)      # logging itself is reporting an error: drop it
+        with self._lock:
+            self._buf += text
+            lines = self._buf.split("\n")
+            self._buf = lines.pop()
+        self._busy.on = True
+        try:
+            for line in lines:
+                if line.strip():
+                    self._log.log(self._level, line.rstrip())
+        finally:
+            self._busy.on = False
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+def _setup_logging(to_file):
+    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S" if to_file else "%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
+        root.addHandler(console)
+    if to_file:
+        from logging.handlers import RotatingFileHandler
+        try:
+            fh = RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=2,
+                                     encoding="utf-8")
+        except OSError:
+            fh = None
+        if fh:
+            fh.setFormatter(fmt)
+            # Werkzeug logs every request at INFO — hundreds per screen of
+            # posters. Keep its warnings, drop the request lines.
+            fh.addFilter(lambda r: r.name != "werkzeug" or r.levelno >= logging.WARNING)
+            root.addHandler(fh)
+    if sys.stdout is None or sys.stderr is None:
+        logging.raiseExceptions = False   # no console to report logging errors to
+        sys.stdout = sys.stdout or _ConsoleToLog(logging.INFO)
+        sys.stderr = sys.stderr or _ConsoleToLog(logging.ERROR)
+
+
+# A log file only for real runs (`python app.py`, the launcher's pythonw, the
+# installed exe). Importing the module — tests, the preview server — leaves it
+# alone.
+_setup_logging(to_file=__name__ == "__main__" or paths.FROZEN)
 log = logging.getLogger("jht")
 
-app = Flask(__name__)
+# Templates and static files ship inside the exe (RESOURCE_DIR); from source
+# that is simply the project folder.
+app = Flask(__name__,
+            template_folder=os.path.join(paths.RESOURCE_DIR, "templates"),
+            static_folder=os.path.join(paths.RESOURCE_DIR, "static"))
 app.config["SECRET_KEY"] = SECRET_KEY
 
 # async_mode is pinned deliberately — do not remove it.
@@ -100,8 +178,7 @@ DEVICE_ID = "jellyfin-home-theater"
 # session instead of opening a new one each time — accounts can have a
 # "maximum simultaneous sessions" limit that would otherwise fill up.
 # Delete this file to force a fresh login.
-TOKEN_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           ".jellyfin_session.json")
+TOKEN_CACHE = paths.TOKEN_CACHE
 
 jf = JellyfinClient(JELLYFIN_URL, JELLYFIN_USER, JELLYFIN_PASSWORD,
                     device_id=DEVICE_ID, token_cache=TOKEN_CACHE)
@@ -188,17 +265,58 @@ def view_collection_type(view_id):
 
 
 # ── Page routes ───────────────────────────────────────────────────────────────
+# Each page is stamped with the version that served it, so a page left open
+# across an update can tell it is out of date and reload itself.
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", version=__version__)
 
 @app.route("/tv")
 def tv():
-    return render_template("tv.html")
+    return render_template("tv.html", version=__version__)
 
 @app.route("/remote")
 def remote():
-    return render_template("remote.html")
+    return render_template("remote.html", version=__version__)
+
+
+# ── Updates ───────────────────────────────────────────────────────────────────
+import updater as _updater_module   # noqa: E402
+
+updater = _updater_module.Updater()
+updater.on_ytdlp_updated = lambda: ytdlp_tool(refresh=True)
+
+
+@app.route("/api/update/status")
+def api_update_status():
+    return jsonify({**updater.snapshot(), "ytDlp": ytdlp_version_text()})
+
+
+@app.route("/api/update/check", methods=["POST"])
+def api_update_check():
+    """Check now (and download, if there is something new). Answers at once;
+    poll /api/update/status for the outcome."""
+    threading.Thread(target=updater.check, kwargs={"manual": True},
+                     daemon=True, name="updateCheck").start()
+    time.sleep(0.2)
+    return jsonify(updater.snapshot())
+
+
+@app.route("/api/update/install", methods=["POST"])
+def api_update_install():
+    if not updater.install("requested from the TV or phone"):
+        return jsonify({"ok": False, "error": "no update is ready to install",
+                        **updater.snapshot()}), 409
+    return jsonify({"ok": True, **updater.snapshot()})
+
+
+@app.route("/api/update/auto", methods=["POST"])
+def api_update_auto():
+    body = request.get_json(silent=True) or {}
+    if "enabled" not in body:
+        return jsonify({"error": "enabled required"}), 400
+    updater.set_auto(bool(body["enabled"]))
+    return jsonify(updater.snapshot())
 
 # ── Jellyfin API proxy (keeps the token server-side, avoids CORS) ─────────────
 @app.route("/api/libraries")
@@ -266,6 +384,11 @@ def api_library_all(section_id):
     """
     try:
         sort_by, sort_order = jellyfin.map_sort(request.args.get("sort"))
+        if sort_by == "DatePlayed" and view_collection_type(section_id) == "tvshows":
+            # A series is never "played" itself — its DatePlayed is empty, so
+            # "Last Watched" came back in plain title order. SeriesDatePlayed
+            # sorts shows by their most recently watched episode.
+            sort_by = "SeriesDatePlayed"
         params = _library_query(section_id)
         params.update({
             "startIndex": request.args.get("start", 0),
@@ -539,8 +662,16 @@ def img_proxy():
     except Exception:
         return "", 502
 
+    def relay():
+        # Closing explicitly returns the connection to the pool even when the
+        # browser gives up halfway (scrolling past a row of posters does).
+        try:
+            yield from r.iter_content(chunk_size=8192)
+        finally:
+            r.close()
+
     return Response(
-        r.iter_content(chunk_size=8192),
+        relay(),
         content_type=r.headers.get("Content-Type", "image/jpeg"),
         headers={
             # Artwork for a given tag+size never changes — let Chrome cache it
@@ -618,9 +749,15 @@ def stream_url(rating_key):
         selected_sub = next((t for t in sub_tracks if t["selected"] and t["id"]), None)
         burn_sub_idx = jellyfin.stream_index(selected_sub["id"]) if selected_sub else None
 
+        # `ApiKey`, not the legacy `api_key`. Jellyfin 10.11 added a server
+        # switch (EnableLegacyAuthorization) that stops accepting the old
+        # spelling, and it is off by default from 12.x: every master.m3u8
+        # then answers 401 and nothing but browser-native MP4s will play.
+        # Jellyfin copies this parameter into the variant and segment URLs
+        # it generates, so one key here authorises the whole HLS session.
         common = {
             "mediaSourceId": msid,
-            "api_key":       jf.token,
+            "ApiKey":        jf.token,
             "deviceId":      DEVICE_ID,
         }
         if session:
@@ -726,7 +863,7 @@ def stream_url(rating_key):
             "directStream":   direct_stream_url,  # Tier 2: remux audio only
             "transcode":      transcode_url,      # Tier 3: full re-encode
             "duration":       runtime_ms,
-            "quality":        jellyfin.source_quality(source),
+            "quality":        jellyfin.source_quality(source, audio_idx),
             "audioTracks":    audio_tracks,
             "subTracks":      sub_tracks,
             "partId":         msid,
@@ -841,8 +978,116 @@ def api_mark_watched():
 #  remuxed on the fly into fragmented MP4 that the browser <video> can play.
 # ═══════════════════════════════════════════════════════════════════════════
 
-YT_DLP  = shutil.which("yt-dlp")
-_FFMPEG = shutil.which("ffmpeg")
+# Child processes are console programs. When the app itself runs windowless
+# (pythonw, which is how remote_launcher.py starts it), Windows gives every
+# console child a console window of its own — a black box popping up over the
+# TV for each search and each video. CREATE_NO_WINDOW suppresses that.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _find_ytdlp():
+    """The yt-dlp command, as an argv prefix, or None if it isn't installed.
+
+    The installed exe keeps its own copy in the tools folder, downloaded and
+    kept current by updater.py — YouTube breaks old versions every few weeks,
+    so it must not wait for a release of this program. Otherwise the
+    standalone executable when one is on PATH (WinGet, Scoop, pipx), and from
+    source the Python package, run as a module: `pip install yt-dlp` puts the
+    package in site-packages but its launcher in a Scripts folder that is
+    often not on PATH, which made the YouTube app report "yt-dlp is not
+    installed" on a machine where it was.
+    """
+    if paths.FROZEN:
+        tool = os.path.join(paths.TOOLS_DIR, "yt-dlp.exe")
+        if os.path.isfile(tool):
+            return [tool]
+    exe = shutil.which("yt-dlp")
+    if exe:
+        return [exe]
+    if paths.FROZEN:
+        return None         # sys.executable is this program, not a Python
+    import importlib.util
+    if importlib.util.find_spec("yt_dlp") is None:
+        return None
+    # python.exe rather than pythonw.exe: a windowless interpreter is not
+    # guaranteed working std streams, and yt-dlp answers on stdout.
+    # _NO_WINDOW keeps the console interpreter invisible.
+    py = sys.executable
+    console = os.path.join(os.path.dirname(py), "python.exe")
+    if os.path.basename(py).lower() == "pythonw.exe" and os.path.isfile(console):
+        py = console
+    return [py, "-m", "yt_dlp"]
+
+
+def _ytdlp_version(cmd):
+    """yt-dlp's version as a comparable tuple, e.g. (2026, 10, 26)."""
+    try:
+        out = subprocess.run(cmd + ["--version"], capture_output=True, text=True,
+                             timeout=30, creationflags=_NO_WINDOW).stdout.strip()
+        return tuple(int(p) for p in out.split(".")[:3])
+    except Exception:
+        return ()
+
+
+def _ytdlp_js_args(version):
+    """Let yt-dlp solve YouTube's JavaScript challenges.
+
+    Since late 2025 yt-dlp needs a JavaScript runtime for YouTube; without
+    one it can only offer a 360p fallback stream. Only Deno is enabled by
+    default, so when Deno is absent but Node.js is installed, say so
+    explicitly. (The challenge-solver scripts ship separately on PyPI as
+    yt-dlp-ejs; the standalone yt-dlp.exe bundles them.)
+    """
+    if not version or version < (2025, 11, 12):
+        return []           # predates --js-runtimes; passing it would fail
+    if shutil.which("deno"):
+        return []           # yt-dlp's default runtime, found on its own
+    node = shutil.which("node")
+    if node:
+        return ["--js-runtimes", f"node:{node}"]
+    return []
+
+
+_yt_tool = {"cmd": None, "version": (), "js": [], "at": 0.0}
+_yt_tool_lock = threading.Lock()
+
+
+def ytdlp_tool(refresh=False):
+    """(argv prefix, JS-runtime args) for running yt-dlp; (None, []) if absent.
+
+    Resolved lazily, and again when asked (the tool updater has just swapped
+    the binary) or — while it is missing — at most once a minute, so a
+    yt-dlp.exe that finishes downloading after startup is picked up without a
+    restart.
+    """
+    with _yt_tool_lock:
+        now = time.time()
+        stale = (not _yt_tool["at"]
+                 or (_yt_tool["cmd"] is None and now - _yt_tool["at"] > 60))
+        if refresh or stale:
+            cmd = _find_ytdlp()
+            version = _ytdlp_version(cmd) if cmd else ()
+            _yt_tool.update(cmd=cmd, version=version,
+                            js=_ytdlp_js_args(version), at=now)
+        return _yt_tool["cmd"], _yt_tool["js"]
+
+
+def ytdlp_version_text():
+    ytdlp_tool()
+    return ".".join(str(p) for p in _yt_tool["version"]) or None
+
+
+def ffmpeg_path():
+    """ffmpeg from the tools folder (installed exe) or PATH, else None."""
+    if paths.FROZEN:
+        tool = os.path.join(paths.TOOLS_DIR, "ffmpeg.exe")
+        if os.path.isfile(tool):
+            return tool
+    return shutil.which("ffmpeg")
+
+# YouTube video ids: 11 characters of base64url. Anything else is refused
+# before it gets anywhere near a URL or a subprocess.
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 # Resolved stream URLs are signed and expire after a few hours — cache briefly
 _yt_cache = {}
@@ -924,9 +1169,14 @@ def _ytdlp_json(args, timeout=60):
     # AV suites (AVG/Avast…) that scan HTTPS re-sign traffic with a root CA
     # that only exists in the Windows store — yt-dlp's bundled certifi list
     # rejects it and every request fails CERTIFICATE_VERIFY_FAILED.
+    cmd, js_args = ytdlp_tool()
+    if not cmd:
+        raise RuntimeError("yt-dlp is not installed")
     proc = subprocess.run(
-        [YT_DLP, "--no-warnings", "--compat-options", "no-certifi", "-J"] + args,
+        cmd + ["--no-warnings", "--compat-options", "no-certifi"]
+        + js_args + ["-J"] + args,
         capture_output=True, timeout=timeout, env=_net_env(),
+        creationflags=_NO_WINDOW,
     )
     # yt-dlp can exit non-zero when single entries fail while still printing
     # a valid JSON document — use the output if there is one.
@@ -980,7 +1230,7 @@ def _yt_resolve(video_id):
         "audio_url":  audio_url,
         "user_agent": headers.get("User-Agent", ""),
     }
-    _yt_cache[video_id] = {"ts": now, "info": info}
+    _remember(_yt_cache, video_id, {"ts": now, "info": info}, cap=100)
     return info
 
 
@@ -1034,7 +1284,8 @@ class _YtSourceHandler(BaseHTTPRequestHandler):
 
     def _target(self):
         parts = self.path.strip("/").split("/")
-        if len(parts) != 2 or parts[1] not in ("v", "a"):
+        if (len(parts) != 2 or parts[1] not in ("v", "a")
+                or not _YT_ID_RE.match(parts[0])):
             return None, None
         try:
             info = _yt_resolve(parts[0])
@@ -1127,21 +1378,43 @@ class _YtSourceHandler(BaseHTTPRequestHandler):
 
         chunk = _yt_chunk_size(total)
         pos, rn = 0, 1
+        drops = 0
+        r = first
         try:
-            r = first
             while True:
                 served = 0
-                for block in r.iter_content(64 * 1024):
-                    if not block:
-                        break
-                    self.wfile.write(block)
-                    served += len(block)
-                r.close()
-                if not served:
-                    break
+                dropped = False
+                # Upstream errors (requests.RequestException) are told apart
+                # from ffmpeg going away (a plain OSError from the write):
+                # the first is worth resuming, the second ends the request.
+                try:
+                    for block in r.iter_content(64 * 1024):
+                        if not block:
+                            break
+                        self.wfile.write(block)
+                        served += len(block)
+                except requests.RequestException as exc:
+                    # googlevideo drops connections that sit idle — and they
+                    # do, whenever the browser has buffered far ahead and
+                    # stopped reading, which stalls ffmpeg and in turn us.
+                    # Ending the response here used to end the video; the
+                    # protocol is happy to continue from the exact byte with
+                    # the next request number, so do that instead.
+                    dropped = True
+                    logging.getLogger("yt").info(
+                        "proxy upstream dropped at byte %s (%s) — resuming",
+                        pos + served, type(exc).__name__)
+                finally:
+                    r.close()
                 pos += served
                 if total and pos >= total:
                     break
+                if served:
+                    drops = 0
+                elif not dropped or drops >= 3:
+                    break               # end of stream, or upstream is gone
+                else:
+                    drops += 1
                 end = pos + chunk - 1
                 if total:
                     end = min(end, total - 1)
@@ -1149,8 +1422,7 @@ class _YtSourceHandler(BaseHTTPRequestHandler):
                 if r is None:
                     break
                 rn += 1
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
-                OSError):
+        except OSError:
             pass        # ffmpeg stopped reading (seek, or playback ended)
         finally:
             session.close()
@@ -1177,12 +1449,15 @@ def _yt_proxy_port():
 
 @app.route("/api/yt/search")
 def yt_search():
-    if not YT_DLP:
+    if not ytdlp_tool()[0]:
         return jsonify({"error": "yt-dlp is not installed"}), 501
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify([])
-    n = min(int(request.args.get("n", 24)), 40)
+    try:
+        n = max(1, min(int(request.args.get("n", 24)), 40))
+    except ValueError:
+        n = 24
     try:
         data = _ytdlp_json(["--flat-playlist", f"ytsearch{n}:{q}"], timeout=60)
         out = []
@@ -1205,8 +1480,10 @@ def yt_search():
 
 @app.route("/api/yt/resolve/<video_id>")
 def yt_resolve(video_id):
-    if not YT_DLP:
+    if not ytdlp_tool()[0]:
         return jsonify({"error": "yt-dlp is not installed"}), 501
+    if not _YT_ID_RE.match(video_id):
+        return jsonify({"error": "invalid video id"}), 400
     try:
         info = _yt_resolve(video_id)
     except Exception as e:
@@ -1250,8 +1527,11 @@ def yt_resolve(video_id):
 def yt_stream(video_id):
     """Remux the resolved video+audio streams into fragmented MP4 on the fly.
     Supports ?t=<seconds> for seeking (ffmpeg starts both inputs there)."""
-    if not YT_DLP or not _FFMPEG:
+    ffmpeg = ffmpeg_path()
+    if not ytdlp_tool()[0] or not ffmpeg:
         return jsonify({"error": "yt-dlp and ffmpeg are required"}), 501
+    if not _YT_ID_RE.match(video_id):
+        return jsonify({"error": "invalid video id"}), 400
     try:
         t = max(0.0, float(request.args.get("t", 0) or 0))
         info = _yt_resolve(video_id)
@@ -1286,7 +1566,7 @@ def yt_stream(video_id):
             opts += ["-ss", f"{t:.3f}"]
         return opts
 
-    cmd = [_FFMPEG, "-v", "error", "-nostdin"]
+    cmd = [ffmpeg, "-v", "error", "-nostdin"]
     cmd += _in_opts() + ["-i", src("v")]
     if info["audio_url"]:
         cmd += _in_opts() + ["-i", src("a"), "-map", "0:v:0", "-map", "1:a:0"]
@@ -1297,30 +1577,64 @@ def yt_stream(video_id):
     ]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=_net_env())
+                            stderr=subprocess.PIPE, env=_net_env(),
+                            creationflags=_NO_WINDOW)
 
     # Drain stderr in the background so the pipe never fills (which would stall
     # ffmpeg) and so real failures are visible in the log instead of silent.
+    last_errors = []
+
     def _drain_stderr():
         try:
             for line in iter(proc.stderr.readline, b""):
                 msg = line.decode("utf-8", errors="replace").strip()
                 if msg:
                     logging.getLogger("yt").warning("ffmpeg[%s]: %s", video_id, msg)
+                    last_errors.append(msg)
+                    del last_errors[:-3]
         except Exception:
             pass
 
-    threading.Thread(target=_drain_stderr, daemon=True, name="ytFfmpegErr").start()
+    drain = threading.Thread(target=_drain_stderr, daemon=True, name="ytFfmpegErr")
+    drain.start()
+
+    # Hold the response until ffmpeg has produced something. If it dies first
+    # — YouTube refused the stream, typically because yt-dlp is out of date —
+    # the browser gets a real error rather than an empty 200, which it could
+    # only retry forever.
+    first = proc.stdout.read1(64 * 1024)
+    if not first:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        drain.join(timeout=2)
+        log.warning("YouTube stream %s failed before any data: %s", video_id,
+                    " | ".join(last_errors) or "no output from ffmpeg")
+        return jsonify({"error": "YouTube refused the stream — update yt-dlp "
+                                 "(pip install -U yt-dlp yt-dlp-ejs)"}), 502
 
     def generate():
         try:
+            yield first
             while True:
                 chunk = proc.stdout.read(64 * 1024)
                 if not chunk:
                     break
                 yield chunk
         finally:
+            # Every seek and every watchdog restart ends one of these, so
+            # reap it properly — a killed-but-unwaited process keeps its
+            # handles (and its pipes) until the garbage collector notices.
             proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
 
     return Response(generate(), content_type="video/mp4",
                     headers={"Cache-Control": "no-store"})
@@ -1748,7 +2062,10 @@ def _lights_watchdog():
             pass
 
 
-if DIM_ON_PLAYBACK:
+# Whenever there are lights to drive — not only when DIM_ON_PLAYBACK starts
+# out on. Dimming can be switched on later from the phone's Lights tab, and a
+# TV page closed mid-film would then have left the room dark for good.
+if wled_hosts() or ha_lights():
     threading.Thread(target=_lights_watchdog, daemon=True,
                      name="lightsWatchdog").start()
 
@@ -1898,6 +2215,9 @@ def _apply_command_to_state(data):
 @socketio.on("command")
 def on_command(data):
     """Remote sends a command → relay to TV and update state."""
+    if not isinstance(data, dict) or not data.get("action"):
+        return
+    note_activity()
     _apply_command_to_state(data)
     emit("command", data, broadcast=True, include_self=False)
     emit("state", state, broadcast=True)
@@ -1915,6 +2235,27 @@ def on_command(data):
 _tv_sids = set()
 _tv_seen = {"at": 0.0}
 
+# When someone last did something on the TV — a remote command, a screen
+# change, or a keypress the TV page reports. An automatic update only
+# restarts the app once this has been quiet for a while.
+_activity = {"at": time.time()}
+
+
+def note_activity():
+    _activity["at"] = time.time()
+
+
+def tv_idle():
+    """(may an automatic update restart the app now?, why)."""
+    if not _tv_sids:
+        return True, "no TV page open"
+    if state.get("screen") == "player":
+        return False, "something is playing"
+    quiet = time.time() - _activity["at"]
+    if quiet >= _updater_module.AUTO_IDLE_SECONDS:
+        return True, f"TV idle for {int(quiet // 60)} min"
+    return False, "the TV is in use"
+
 
 @app.route("/api/command", methods=["POST"])
 def api_command():
@@ -1926,6 +2267,7 @@ def api_command():
     if "value" in body:
         payload["value"] = body["value"]
 
+    note_activity()
     _apply_command_to_state(payload)
     socketio.emit("command", payload)
     socketio.emit("state", state)
@@ -1954,9 +2296,34 @@ def api_tv_status():
         "title":         state.get("title") or "",
     })
 
+@app.route("/api/kiosk/show", methods=["POST"])
+def api_kiosk_show():
+    """Put the TV UI on the TV: reopen the kiosk if it was closed, or bring
+    it to the front.
+
+    remote_launcher.py calls this when its button is pressed and the app is
+    already running — previously that press did nothing, so a kiosk closed
+    with Alt+F4 stayed closed until the app was restarted. Loopback only: it
+    launches a browser on this PC.
+    """
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        return jsonify({"error": "only available from this PC"}), 403
+    if not MONITOR_NAME:
+        return jsonify({"ok": False, "error": "monitor watcher is disabled"}), 501
+    import monitor_watcher
+    if not monitor_watcher.request_kiosk():
+        return jsonify({"ok": False, "error": "monitor watcher is not running"}), 503
+    return jsonify({"ok": True})
+
+
 @socketio.on("state_update")
 def on_state_update(data):
     """TV sends its current state → broadcast to all remotes."""
+    if not isinstance(data, dict):
+        return
+    if (data.get("screen") != state.get("screen")
+            or bool(data.get("playing")) != bool(state.get("playing"))):
+        note_activity()
     state.update(data)
     # Only the TV sends this, so it is how a TV page identifies itself. The
     # USB remote bridge asks /api/tv_status whether any are connected before
@@ -1978,6 +2345,13 @@ def on_ping():
     emit("pong_check")
 
 
+@socketio.on("activity")
+def on_activity(*_args):
+    """The TV page reports keypresses (throttled): browsing with a remote
+    plugged into the PC never reaches the server otherwise."""
+    note_activity()
+
+
 @socketio.on("disconnect")
 def on_disconnect(*args):
     """A TV page closing is what makes the remote behave like a keyboard again."""
@@ -1987,7 +2361,45 @@ def on_disconnect(*args):
         pass
 
 # ── Startup ───────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+def lan_address():
+    """This PC's address on the LAN, for the phone remote's URL."""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))       # nothing is sent; picks the LAN route
+        return sock.getsockname()[0]
+    except OSError:
+        return "localhost"
+    finally:
+        sock.close()
+
+
+def show_tv_ui():
+    """Put the TV screen up: through the watcher (kiosk on the TV) when there
+    is one, else in the default browser."""
+    if MONITOR_NAME:
+        import monitor_watcher
+        if monitor_watcher.request_kiosk():
+            return
+    import webbrowser
+    webbrowser.open(f"http://localhost:{PORT}/tv")
+
+
+def _serve():
+    socketio.run(app, host="0.0.0.0", port=PORT, debug=False,
+                 use_reloader=False, allow_unsafe_werkzeug=True)
+
+
+def main(tray=False, updated_from=None):
+    """Start everything. `tray` runs the web server on a background thread
+    and the tray icon on this one (the installed exe); without it the server
+    runs here, as it always has from source."""
+    if updated_from:
+        updater.updated_from = updated_from
+        log.info("Updated from %s to %s", updated_from, __version__)
+    print(f"🎬  Jellyfin Home Theater {__version__}"
+          f"{'' if paths.FROZEN else ' (from source)'}")
+
     # Verify the Jellyfin connection on startup
     try:
         info = jf.connect()
@@ -1999,6 +2411,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"⚠  Could not reach Jellyfin at {JELLYFIN_URL}: {e}")
         print("   The app will still start but your library won't load.")
+        print("   (The TV page keeps retrying, so it fills in once Jellyfin is up.)")
 
     # ── Start monitor watcher ────────────────────────────────────────────────
     if MONITOR_NAME:
@@ -2016,13 +2429,65 @@ if __name__ == "__main__":
         if REQUIRE_ACTIVE_INPUT:
             print(f"   HDMI input check enabled (DDC/CI). "
                   f"Expected VCP value: {EXPECTED_INPUT_VCP if EXPECTED_INPUT_VCP is not None else 'auto-learn'}")
-        print(f"   (run  python find_displays.py  to list all connected displays)")
     else:
         print("ℹ  Monitor watcher disabled (MONITOR_NAME is None in config.py)")
 
-    local_ip = "0.0.0.0"
-    print(f"\n🎬  Jellyfin Home Theater running!")
-    print(f"   TV Display   → http://localhost:{PORT}/tv")
-    print(f"   Phone Remote → http://<your-pc-ip>:{PORT}/remote\n")
+    # ── YouTube readiness (yt-dlp is resolved off-thread: it can take a
+    #    second to answer --version, and the TV shouldn't wait for that) ──────
+    def _report_youtube():
+        cmd, js = ytdlp_tool()
+        if not cmd:
+            print("ℹ  YouTube engine (yt-dlp) not available yet"
+                  + (" — downloading it" if paths.FROZEN else " — pip install yt-dlp"))
+            return
+        how = "python -m yt_dlp" if len(cmd) > 1 else cmd[0]
+        runtime = js[1].split(":", 1)[0] if js else (
+            "deno" if shutil.which("deno") else "none — YouTube is limited to 360p")
+        print(f"▶  YouTube: yt-dlp {ytdlp_version_text() or '?'} ({how}), "
+              f"JS runtime: {runtime}, "
+              f"ffmpeg: {'found' if ffmpeg_path() else 'MISSING — playback disabled'}")
+    threading.Thread(target=_report_youtube, daemon=True, name="ytReady").start()
 
-    socketio.run(app, host=local_ip, port=PORT, debug=False, allow_unsafe_werkzeug=True)
+    # ── Updates (installed exe only) ─────────────────────────────────────────
+    updater.is_idle = tv_idle
+    if paths.FROZEN:
+        updater.start()
+        try:
+            import installer
+            installer.refresh_registration()
+        except Exception as exc:
+            log.debug("could not refresh the install registration: %s", exc)
+
+    print("")
+    print("🎬  Jellyfin Home Theater running!")
+    print(f"   TV Display   → http://localhost:{PORT}/tv")
+    print(f"   Phone Remote → http://{lan_address()}:{PORT}/remote")
+    print("")
+
+    if not tray:
+        _serve()
+        return
+
+    def _serve_or_quit():
+        try:
+            _serve()
+        except OSError as exc:
+            log.error("could not start the web server on port %s: %s", PORT, exc)
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    None, f"Port {PORT} is already in use by another program, so "
+                          f"Jellyfin Home Theater can't start." + "\n\n" + str(exc),
+                    "Jellyfin Home Theater", 0x10)
+            except Exception:
+                pass
+            os._exit(1)
+
+    threading.Thread(target=_serve_or_quit, daemon=True, name="webServer").start()
+    import tray as tray_module
+    tray_module.run(updater, show_tv=show_tv_ui,
+                    remote_url=lambda: f"http://{lan_address()}:{PORT}/remote")
+
+
+if __name__ == "__main__":
+    main()

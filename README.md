@@ -4,7 +4,8 @@
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![Flask](https://img.shields.io/badge/Flask-SocketIO-000000)
-![Jellyfin](https://img.shields.io/badge/Jellyfin-10.10%2B-00A4DC)
+![Jellyfin](https://img.shields.io/badge/Jellyfin-10.10%2B%20%7C%2012-00A4DC)
+![Windows](https://img.shields.io/badge/Windows-installer%20%2B%20auto--update-0078D6)
 ![Platform](https://img.shields.io/badge/kiosk%20helpers-Windows-0078D6)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -29,21 +30,77 @@ Both pages connect via WebSocket, so the remote controls the TV in real time.
 - **Aspect modes** that remove black bars so screen-capture ambilights stay lit.
 - **USB remote bridge**: a cheap HID remote controls the TV UI even while you use the PC for something else.
 - **Auto kiosk**: launches the TV UI when the TV switches to the PC's HDMI input (DDC/CI detection).
+- **Installs and updates itself** on Windows: one exe, no Python needed, automatic updates that wait until the TV is idle.
+
+---
+
+## Download and install (Windows)
+
+1. Download `JellyfinHomeTheater-<version>-win64.zip` from the
+   [latest release](https://github.com/deniskostadinov1995/jellyfin-home-theater/releases/latest)
+   and extract it anywhere.
+2. Run `JellyfinHomeTheater.exe` and answer **Yes** to install. It installs
+   for your user only (no admin rights) to
+   `%LOCALAPPDATA%\Programs\Jellyfin Home Theater`, adds **Desktop** and
+   **Start-menu** shortcuts, starts the remote-button listener at logon, and
+   shows up in **Settings → Apps** for uninstalling.
+3. Enter your Jellyfin details: tray icon → **Edit settings** opens
+   `config.py` (kept in `%LOCALAPPDATA%\Jellyfin Home Theater`, which updates
+   never touch). Save it, then tray icon → **Restart**.
+
+Windows SmartScreen may warn about an unrecognised app the first time — the
+exe isn't code-signed. Choose *More info → Run anyway*.
+
+| Shortcut / command | What it does |
+|---|---|
+| **Jellyfin Home Theater** (Desktop, Start menu) | Starts everything — the app and SignalRGB — or brings the TV screen back if it is already running |
+| *Jellyfin Home Theater Remote* (Startup) | Waits at logon for the remote's launch button (`LAUNCH_KEY_VK` / `LAUNCH_POWER_DEVICE` in config.py) |
+| `JellyfinHomeTheater.exe --find-displays` | Lists displays, for `MONITOR_NAME` |
+| `JellyfinHomeTheater.exe --find-wled` | Finds WLED controllers, for `WLED_IP` |
+| `JellyfinHomeTheater.exe --find-ha-lights` | Lists Home Assistant lights, for `HA_LIGHTS` |
+| `JellyfinHomeTheater.exe --detect-button` | Shows a remote button's key code, for `LAUNCH_KEY_VK` |
+
+While it runs, the tray icon offers: show the TV screen, the phone remote's
+address, updates, edit settings, restart and quit. The logs (`app.log`,
+`update.log`, `remote_launcher.log`) sit next to `config.py`.
+
+## Updates
+
+The installed program keeps itself current from this repository's releases:
+
+- **Checks** a minute after it starts and then every 6 hours, downloads a new
+  version in the background and verifies its SHA-256.
+- **Installs automatically** only when nothing is playing and the TV hasn't
+  been touched for 10 minutes (or no TV screen is open), and never in the
+  first few minutes after you start it. An open TV page reloads itself onto
+  the new version and says *Updated to …*; the kiosk window stays open.
+- **Rolls back** if the new version doesn't come up within a minute, and never
+  auto-installs that version again.
+- **yt-dlp**, the YouTube engine, is kept current separately from yt-dlp's own
+  releases, because YouTube breaks old versions every few weeks.
+
+You can also do it by hand, in three places: the TV (side menu → **⚙
+Settings**), the phone remote (**⚙ App** tab) and the tray icon — *Check for
+updates*, *Install now*, and the *Automatic updates* switch.
 
 ---
 
 ## Requirements
 
-- **Python 3.10+**
-- A **Jellyfin** server (10.10+ for Skip Intro/Credits)
+- **Windows 10/11** for the exe — or **Python 3.10+** to run from source (the
+  web app runs anywhere Python does; the kiosk watcher and USB-remote helpers
+  use the Windows API)
+- A **Jellyfin** server (10.10+ for Skip Intro/Credits; tested on 12.1)
 - **Google Chrome** for the kiosk window
-- **ffmpeg** and **yt-dlp** on `PATH` for the YouTube app (`winget install Gyan.FFmpeg`, `pip install yt-dlp`)
+- For the YouTube app: **ffmpeg** on `PATH` (`winget install Gyan.FFmpeg`) and
+  **Node.js** or **Deno**, which yt-dlp needs to solve YouTube's challenges.
+  The exe downloads and updates yt-dlp itself; from source,
+  `pip install yt-dlp yt-dlp-ejs`.
 - *Optional:* WLED light controllers, Home Assistant, a USB remote
-- The web app runs anywhere Python does. The kiosk/monitor watcher and USB-remote helpers use the Windows API.
 
 ---
 
-## Quick Setup
+## Run from source
 
 ### 1. Download and install dependencies
 
@@ -51,11 +108,12 @@ Both pages connect via WebSocket, so the remote controls the TV in real time.
 git clone https://github.com/deniskostadinov1995/jellyfin-home-theater.git
 cd jellyfin-home-theater
 pip install -r requirements.txt
+copy config.example.py config.py
 ```
 
 ### 2. Configure Jellyfin
 
-Edit `config.py`:
+Edit `config.py` (the installed exe keeps it in `%LOCALAPPDATA%\Jellyfin Home Theater` instead — tray icon → *Edit settings*):
 
 ```python
 JELLYFIN_URL      = "http://localhost:8096"   # Your Jellyfin server
@@ -76,6 +134,16 @@ checkmarks and resume positions all come from that user's data.
 > simultaneous user sessions* limit. Raise it in **Dashboard → Users → (user) →
 > Max simultaneous sessions** (0 = unlimited), or sign an old device out under
 > **Dashboard → Devices**.
+
+Tested against **Jellyfin 12.1**. Stream URLs authenticate with the `ApiKey`
+query parameter: from 12.x Jellyfin rejects the legacy `api_key` spelling by
+default (`EnableLegacyAuthorization` is off), which used to make every
+Direct Stream and Transcode answer 401 — only browser-native MP4s still
+played.
+
+If Jellyfin isn't up yet when the TV page loads (after a reboot the app can
+start first), the home screen says *Waiting for Jellyfin…* and keeps retrying
+on its own.
 
 ### 3. Run
 
@@ -159,13 +227,31 @@ the raw media directly into the same player as your library content:
   proportional to how far in you jump — a couple of minutes into a 4K video
   takes tens of seconds. Playing from the start is immediate.
 
-Requirements: `yt-dlp` and `ffmpeg` on PATH. **Keep yt-dlp updated**
-(`yt-dlp -U` or `pip install -U yt-dlp`) — YouTube changes regularly break
-old versions. If videos stop resolving, that's the first thing to try.
+Requirements:
+
+- **yt-dlp** — either the standalone `yt-dlp.exe` on PATH, or the Python
+  package (`pip install yt-dlp yt-dlp-ejs`), which the app runs as
+  `python -m yt_dlp` when no executable is on PATH.
+- **ffmpeg** on PATH.
+- **A JavaScript runtime** — Node.js or Deno. Since late 2025 yt-dlp has to
+  solve YouTube's JavaScript challenges; without a runtime (and the
+  `yt-dlp-ejs` solver scripts, which `yt-dlp.exe` bundles) YouTube refuses
+  the streams with 403. The app finds Node.js on PATH and passes it to yt-dlp
+  (`--js-runtimes node`), since yt-dlp only looks for Deno by default.
+
+**Keep yt-dlp updated** (`yt-dlp -U`, or `pip install -U yt-dlp yt-dlp-ejs`)
+— YouTube changes regularly break old versions. When a video is refused, the
+TV says *YouTube refused this video* rather than retrying forever; updating
+yt-dlp is the first thing to try. The app logs the yt-dlp version and JS
+runtime it found at startup.
 
 Note: the backend runs yt-dlp with the system certificate store
 (`--compat-options no-certifi`) so antivirus HTTPS scanning (AVG/Avast…)
 doesn't break TLS verification.
+
+If the googlevideo connection drops mid-video (it does when the browser has
+buffered far ahead and stopped reading), the fetch proxy carries on from the
+exact byte with the next request instead of ending the stream.
 
 ### Why there's a fetch proxy in the middle
 
@@ -193,7 +279,10 @@ Find your controllers and paste the line it prints into `WLED_IP`:
 python find_wled.py
 ```
 
-`WLED_IP` takes a list, so several strips are driven together. The phone
+`WLED_IP` takes a list, so several strips are driven together. Prefer the
+mDNS names `find_wled.py` prints (`wled-xxxxxx.local`) over IP addresses: the
+strips are on DHCP, and when one moved to a new address it silently dropped
+out of every light change. The phone
 remote then gains a **💡 Lights** tab, and pressing **L** on the TV cycles the
 same three modes with an on-screen confirmation — so the lights can be changed
 from wherever you already are, without opening the WLED app or SignalRGB.
@@ -368,6 +457,8 @@ without its press makes some applications think a key is stuck.
 
 ## USB remote launcher
 
+> The installed exe sets all of this up for you: the *Jellyfin Home Theater Remote* Startup shortcut runs `JellyfinHomeTheater.exe --listener`. The launch button is configured in `config.py` — `LAUNCH_KEY_VK`, `LAUNCH_KEY_MODS`, `LAUNCH_POWER_DEVICE`, `SIGNALRGB_EXE` — and `JellyfinHomeTheater.exe --detect-button` finds the key code. The rest of this section describes running it from source.
+
 `remote_launcher.py` binds one button on a USB remote to "turn everything on":
 when pressed, it starts **Jellyfin Home Theater** and **SignalRGB** — each only
 if it isn't already running. No dependencies — it uses the built-in Windows API
@@ -382,6 +473,38 @@ python remote_launcher.py --install     # auto-start at logon (undo: --uninstall
 It finds SignalRGB automatically (via its update-proof launcher stub), starts
 the app with `pythonw` (no console window), and logs activity to
 `remote_launcher.log`. Full instructions are in the script's header comment.
+
+`python remote_launcher.py --once` runs the launch action once and exits — the
+**Jellyfin Home Theater** desktop shortcut uses exactly that.
+
+If the app is already running, the button asks it to show the TV UI
+(`POST /api/kiosk/show`, accepted from this PC only): a kiosk window that was
+closed is reopened, and one that is open is brought to the front. It used to
+do nothing in that case, so a kiosk closed with Alt+F4 stayed closed.
+
+The app itself runs windowless under `pythonw`, so it logs to **`app.log`**
+next to `app.py` (rotated at 2 MB) — startup status, warnings, and the
+traceback of anything that crashes.
+
+### The remote's on/off button
+
+The on/off button is **not a keyboard key**, so `--detect` can't see it. It
+sends a HID *System Control* **Sleep** on the remote's separate "HID-compliant
+system controller" interface, which Windows treats as the PC's sleep button —
+that's why pressing it used to put the PC to sleep (event log: *Sleep Reason:
+Button or Lid*).
+
+The launcher reads that interface directly (`SYSTEM_KEY_DEVICE`, default
+`VID_248A&PID_168E`) and fires the same launch action on Sleep/Power. Raw Input
+can't be used for this — Windows never lists System Control collections there —
+but the collection can be opened for shared reading. Reports are decoded with
+the device's own descriptor: this remote uses report ID 4 with a selector byte
+(`01` Sleep, `02` Power, `03` Wake, `00` released), not one bit per key.
+
+**One Windows setting is required**, or the PC launches the app *and* sleeps:
+Control Panel → Power Options → *Choose what the power buttons do* →
+**When I press the sleep button: Do nothing**. This doesn't touch the PC's own
+power button, and Start → Sleep still works.
 
 ## Playback features
 
@@ -473,7 +596,9 @@ index 0 would read as "no subtitles".
 
 | Problem | Fix |
 |---------|-----|
-| "Could not load your Jellyfin library" | Check `JELLYFIN_URL`, `JELLYFIN_USER` and `JELLYFIN_PASSWORD` in config.py. The console prints the exact reason on startup. |
+| Home screen says "Waiting for Jellyfin…" | It retries by itself until the server answers. If it never does, check `JELLYFIN_URL`, `JELLYFIN_USER` and `JELLYFIN_PASSWORD` in config.py — `app.log` has the exact reason. |
+| Only some MP4s play; MKVs fail with "Stream error" | The Jellyfin server rejected the stream's credentials. From Jellyfin 12 the legacy `api_key` URL parameter is refused; the app uses `ApiKey`. If a future server changes this again, the HLS request in Chrome's network tab will show 401. |
+| Where are the logs? | `app.log` next to `app.py` (the launcher starts the app windowless, so there is no console). `remote_launcher.log` and `remote_bridge.log` cover the helpers. |
 | Login fails with HTTP 403 | The account's simultaneous-session limit is full. Raise it in Dashboard → Users, or sign out an old device in Dashboard → Devices. |
 | Login fails with HTTP 401 | Wrong username or password. Delete `.jellyfin_session.json` after fixing config.py. |
 | Video won't play | Check the badge: on Transcode, make sure Jellyfin's ffmpeg is configured (Dashboard → Playback). Try another version from the Quality menu if the title has several. |
@@ -481,7 +606,8 @@ index 0 would read as "no subtitles".
 | Audio is stereo when you want 5.1 | Direct Play keeps the original track untouched. Anything else converts audio to AAC capped at `MAX_AUDIO_CHANNELS` in config.py — raise it to `6`. |
 | Picture drops to a tiny resolution seconds after starting | Jellyfin sizes a stream to fit the bitrate it is given, and assumes 256 kbps when given none — which scales a 4K film to 416x177. `MAX_STREAMING_BITRATE` in config.py is that budget; it should stay high on a LAN. |
 | Badge says Direct Stream but the CPU is busy transcoding | Jellyfin's copy playlist also offers a tone-mapped SDR rung and an H.264 fallback rung, and advertises all of them at the same bandwidth, so hls.js will happily pick a re-encode. The player pins the genuine copy variant by codec and dynamic range (`pickCopyLevel` in tv.js); the console logs which one it chose. |
-| YouTube video won't start, 403s in the log | See *Why there's a fetch proxy in the middle* above, and update yt-dlp. |
+| YouTube video won't start, 403s in the log, or "YouTube refused this video" | Update yt-dlp (`pip install -U yt-dlp yt-dlp-ejs`) and make sure Node.js or Deno is installed — see *YouTube app*. Then *Why there's a fetch proxy in the middle* above. |
+| `pip install` fails with `RecursionError` in `ssl` | Something (often a `usercustomize.py` added to work around antivirus HTTPS scanning) injects truststore into every Python process, and pip injects it a second time. Run pip as `pip --use-deprecated=legacy-certs install …`, which skips pip's own copy. |
 | No Skip Intro button | Jellyfin needs media segments for that item. Run an intro-detection task/plugin, or check `Dashboard → Scheduled Tasks`. Titles without segments simply never show the button. |
 | Kiosk launches on the wrong TV input, or not at all | Run `python monitor_watcher.py` to see which DDC/CI registers your TV answers. Set `EXPECTED_INPUT_VCP` to the value it reports while on the PC's input. If it answers nothing, set `REQUIRE_ACTIVE_INPUT = False`. |
 | The whole UI freezes for several seconds | Fixed: Flask-SocketIO used to pick gevent automatically (because gevent is installed) without the monkeypatching gevent requires, so every blocking call stalled the entire server — a screen of posters serialised into a ~16-second freeze that also froze the remote. `async_mode` is now pinned to `"threading"` in app.py; don't change it back without monkeypatching first. |
@@ -490,6 +616,8 @@ index 0 would read as "no subtitles".
 | Lights stay dim after watching | They restore on pause/stop; if the TV page was closed mid-playback instead, the watchdog brings them up within 90s. Pressing **L** or using the Lights tab fixes it immediately. |
 | Don't want the auto-dimming | Turn off **Dim when playing** on the Lights tab, or set `DIM_ON_PLAYBACK = False`. |
 | Lights tab says no controller configured | Run `python find_wled.py` and put the result in `WLED_IP`. |
+| One strip shows "unreachable" | Its DHCP address changed. Use the `.local` names `find_wled.py` prints, which follow the device. |
+| Remote's power button opens nothing while the app is running | The kiosk only opens while the TV is the active display — check `MONITOR_NAME` (`python find_displays.py`, with the TV on). `app.log` records each "TV UI requested" and what the watcher decided. |
 | Ceiling lights don't respond | Check `HA_TOKEN` is set and `HA_LIGHTS` names real entities — `python find_ha_lights.py` lists them. A bad token shows up as HTTP 401 in the log. |
 | Remote controls the wrong window | That is what `remote_bridge.py` is for — see *USB remote*. Check `REMOTE_DEVICE` is set and the bridge is running; `remote_bridge.log` records what it forwarded. |
 | Remote does nothing at all | With `REMOTE_ONLY_WHEN_TV_RUNNING = True` the bridge deliberately stands aside when no TV page is open. Open `/tv`, or set it `False`. |
@@ -511,6 +639,22 @@ showing. So once a TV has *proven* it answers input-source reads, sustained
 silence is treated as "switched to another input / turned off" (kiosk closes)
 rather than "DDC/CI unsupported" — silence from a talkative TV is itself a
 signal.
+
+---
+
+## Building a release
+
+```bash
+pip install -r requirements.txt pyinstaller pystray pillow psutil truststore
+python build.py      # dist\JellyfinHomeTheater\  +  release\JellyfinHomeTheater-<version>-win64.zip  +  release\latest.json
+python release.py    # publishes both files as GitHub release v<version>
+```
+
+Bump `__version__` in `version.py` and add a section to `CHANGELOG.md` first:
+that section becomes the release notes and what the update prompt shows.
+`build.py` refuses to produce a build that contains `config.py` or your
+Jellyfin password, so a public release can never carry your settings.
+Installed copies pick the new release up on their next check.
 
 ---
 

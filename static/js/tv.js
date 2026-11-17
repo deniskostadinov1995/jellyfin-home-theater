@@ -25,6 +25,16 @@ function imgUrl(thumbPath, w = 300, h = 450) {
   return `/img?path=${encodeURIComponent(thumbPath)}&w=${w}&h=${h}`;
 }
 
+// Escape text from the server (titles, names, track labels) before it goes
+// into innerHTML. A title is data, not markup: "Tom & Jerry" or a stray "<"
+// in an episode name must not break the card, and a quote must not end an
+// attribute early.
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function formatTime(ms) {
   if (!ms || isNaN(ms)) return '0:00';
   const s = Math.floor(ms / 1000);
@@ -97,6 +107,12 @@ const App = {
   IDLE_MS:       3 * 60 * 1000,  // 3 minutes
   // Modal tracking — when any of these are open, focus/back behave differently
   modalOpen:     null,
+  // When the home rows were last fetched (0 = never). Coming back to the
+  // home screen re-reads Continue Watching / Recently Added once stale.
+  homeLoadedAt:  0,
+  // Item a "stopped" report has already gone out for, so ending a title and
+  // then leaving the player doesn't report the stop (and the play) twice.
+  stoppedReported: null,
 };
 
 // ── Focus / Navigation System ──────────────────────────────────────────────
@@ -179,7 +195,7 @@ function buildSidebar(libs) {
     el.dataset.sb = 'library';
     el.innerHTML =
       `<span class="sb-icon">${iconFor(lib.type)}</span>` +
-      `<span class="sb-label">${lib.title}</span>`;
+      `<span class="sb-label">${esc(lib.title)}</span>`;
     el.addEventListener('click', () => { closeSidebar(); openLibrary(lib); });
     wrap.appendChild(el);
   });
@@ -188,6 +204,7 @@ function buildSidebar(libs) {
   wire('[data-sb="search"]',  () => { closeSidebar(); openSearch(); });
   wire('[data-sb="home"]',    () => { closeSidebar(); });
   wire('[data-sb="youtube"]', () => { closeSidebar(); openYouTube(); });
+  wire('[data-sb="settings"]', () => { closeSidebar(); openSettings(); });
 
   App.sidebarItems = [...document.querySelectorAll('#sidebar .sb-item')];
 }
@@ -209,7 +226,11 @@ function closeSidebar(restoreFocus = true) {
   document.getElementById('sidebar').setAttribute('aria-hidden', 'true');
   document.body.classList.remove('sidebar-open');
   App.sidebarItems.forEach(el => el.classList.remove('sb-focused'));
-  if (restoreFocus) setFocus(App.focusRow, App.focusCol);
+  if (restoreFocus) {
+    // Rows may have arrived while the sidebar was open; pick them up.
+    if (App.screen === 'home') refreshHomeGrid();
+    else setFocus(App.focusRow, App.focusCol);
+  }
 }
 
 function setSidebarFocus(idx) {
@@ -260,6 +281,7 @@ const GRID_BUILDERS = {
   player:  () => buildPlayerGrid(),
   search:  () => buildSearchGrid(),
   youtube: () => buildYtGrid(),
+  settings: () => buildSettingsGrid(true),
 };
 
 /**
@@ -326,6 +348,16 @@ function popFocus() {
 function goBack() {
   // If the sidebar is open, close it first
   if (App.sidebarOpen) { closeSidebar(); return; }
+  // Back on the Up Next card means "not now", exactly like its Cancel
+  // button. It used to go through closeModal(), which hid the card but left
+  // the countdown running — so the next episode started anyway ten seconds
+  // later, behind whatever screen you had gone back to.
+  if (App.modalOpen === 'next-up') {
+    cancelNextUp();
+    stopPlayback();
+    goBack();
+    return;
+  }
   // If a modal is open, close it first
   if (App.modalOpen) {
     closeModal();
@@ -342,7 +374,27 @@ function goBack() {
 }
 
 // ── Screen Management ──────────────────────────────────────────────────────
+// Close whatever dialog is open without restoring the focus saved beneath
+// it — that focus belongs to the screen being left.
+function dismissModal() {
+  if (!App.modalOpen) return;
+  if (App.modalOpen === 'next-up') {
+    clearInterval(App.nextUpInterval);
+    App.nextUpInterval = null;
+    document.getElementById('next-up').classList.add('hidden');
+  } else {
+    document.getElementById(App.modalOpen)?.classList.add('hidden');
+  }
+  App.modalOpen = null;
+  App.focusStack = [];
+}
+
 function showScreen(name, opts = {}) {
+  // A screen change takes any open dialog with it. Home or Search on the
+  // remote while, say, the resume dialog was up used to leave it on top of
+  // the new screen — with Back then restoring focus to the old one.
+  dismissModal();
+
   if (!opts._isBack && App.screen && App.screen !== name) {
     App.history.push(App.screen);
     if (App.history.length > 20) App.history.shift();
@@ -366,98 +418,153 @@ function showScreen(name, opts = {}) {
   App.focusCol = 0;
 
   if (name === 'home')    buildHomeGrid();
+  if (name === 'home' && App.homeLoadedAt &&
+      Date.now() - App.homeLoadedAt > 30 * 1000) refreshHomeRows();
   if (name === 'library') buildLibraryGrid();
   if (name === 'detail')  buildDetailGrid();
   if (name === 'player')  buildPlayerGrid();
   if (name === 'search')  buildSearchGrid();
   if (name === 'youtube') buildYtGrid();
+  if (name === 'settings') buildSettingsGrid();
 
   broadcastState();
   bumpIdle();   // any screen change resets the screensaver timer
 }
 
 // ── HOME SCREEN ────────────────────────────────────────────────────────────
+let homeRetryTimer = null;
+let homeRetryDelay = 3000;
+
 async function loadHome() {
+  clearTimeout(homeRetryTimer);
+  let onDeck, recent, libs;
   try {
-    const [onDeck, recent, libs] = await Promise.all([
+    [onDeck, recent, libs] = await Promise.all([
       api('/api/on_deck'),
       api('/api/recently_added'),
       api('/api/libraries'),
     ]);
+  } catch (e) {
+    // Almost always Jellyfin not being up yet: after a reboot the app can
+    // start before the server does. This used to leave a dead home screen
+    // (no rows, no D-pad focus) until someone reloaded the page; keep
+    // retrying instead, backing off to every 30 s.
+    console.warn('loadHome failed, retrying:', e);
+    showToast('⚠ Waiting for Jellyfin… retrying');
+    document.getElementById('hero-title').textContent = 'Waiting for Jellyfin…';
+    hideLoading();
+    homeRetryTimer = setTimeout(loadHome, homeRetryDelay);
+    homeRetryDelay = Math.min(homeRetryDelay * 2, 30000);
+    return;
+  }
+  homeRetryDelay = 3000;
+  App.homeLoadedAt = Date.now();
 
-    App.libraries = libs;
-    buildSidebar(libs);
+  App.libraries = libs;
+  buildSidebar(libs);
 
-    // Hero item
+  // Hero item
+  const hero = onDeck[0] || recent[0];
+  if (hero) renderHero(hero);
+  else document.getElementById('hero-title').textContent = 'Jellyfin';
+
+  // Continue Watching row
+  renderRow('items-continue', onDeck.slice(0, 20), true);
+
+  // Recently Added row (show watch indicators)
+  renderRow('items-recent', recent.slice(0, 20), false, true);
+
+  // Library rows — fetched in parallel, and each on its own: a library that
+  // fails to list loses its row instead of taking the whole screen down.
+  const rows = await Promise.all(libs.map(lib =>
+    api(`/api/library/${lib.key}/all?size=20`).catch(err => {
+      console.warn(`library row "${lib.title}" failed:`, err);
+      return [];
+    })));
+  const libContainer = document.getElementById('library-rows');
+  libContainer.innerHTML = '';
+  libs.forEach((lib, i) => {
+    const items = rows[i] || [];
+    if (!items.length) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'row-section';
+    wrap.innerHTML = `
+      <div class="row-header">
+        <h2 class="row-title">${esc(lib.title)}</h2>
+        <button class="see-all-btn focusable">Browse All →</button>
+      </div>
+      <div class="row-items"></div>
+    `;
+    libContainer.appendChild(wrap);
+    renderRowInto(wrap.querySelector('.row-items'), items.slice(0, 20), false, true);
+    wrap.querySelector('.see-all-btn').addEventListener('click', () => openLibrary(lib));
+  });
+
+  // Collections & Playlists — load lazily, hide if empty
+  loadCollectionsAndPlaylists();
+
+  // Pre-fetch backdrops for screensaver
+  api('/api/random_art?n=40').then(arr => { App.ssArt = arr || []; }).catch(()=>{});
+
+  refreshHomeGrid();
+  hideLoading();
+}
+
+// Continue Watching and Recently Added go stale while the kiosk runs for days
+// — finish an episode and the row still offered it. Re-read them when coming
+// back to the home screen (after playback, or after a while away).
+async function refreshHomeRows() {
+  try {
+    const [onDeck, recent] = await Promise.all([
+      api('/api/on_deck'), api('/api/recently_added'),
+    ]);
+    App.homeLoadedAt = Date.now();
     const hero = onDeck[0] || recent[0];
     if (hero) renderHero(hero);
-
-    // Continue Watching row
     renderRow('items-continue', onDeck.slice(0, 20), true);
-
-    // Recently Added row (show watch indicators)
     renderRow('items-recent', recent.slice(0, 20), false, true);
+    refreshHomeGrid();
+  } catch (_) { /* keep what is on screen */ }
+}
 
-    // Library rows
-    const libContainer = document.getElementById('library-rows');
-    libContainer.innerHTML = '';
-
-    for (const lib of libs) {
-      const items = await api(`/api/library/${lib.key}/all?size=20`);
-      const wrap = document.createElement('div');
-      wrap.className = 'row-section';
-      wrap.innerHTML = `
-        <div class="row-header">
-          <h2 class="row-title">${lib.title}</h2>
-          <button class="see-all-btn focusable" data-libkey="${lib.key}">Browse All →</button>
-        </div>
-        <div class="row-items" id="items-lib-${lib.key}"></div>
-      `;
-      libContainer.appendChild(wrap);
-      renderRow(`items-lib-${lib.key}`, items.slice(0, 20), false, true);
-
-      wrap.querySelector('.see-all-btn').addEventListener('click', () => openLibrary(lib));
-    }
-
-    // Collections & Playlists — load lazily, hide if empty
-    loadCollectionsAndPlaylists();
-
-    // Pre-fetch backdrops for screensaver
-    api('/api/random_art?n=40').then(arr => { App.ssArt = arr || []; }).catch(()=>{});
-
-    buildHomeGrid();
-    hideLoading();
-  } catch (e) {
-    console.error('loadHome error:', e);
-    showToast('⚠ Could not load your Jellyfin library. Check config.py');
-    hideLoading();
+// Rebuild the home focus grid after its rows change — but only while the
+// home screen is what the user is actually looking at. Rows can land after
+// they have already moved on to Search or YouTube, and rebuilding then would
+// swap the home grid in underneath the other screen. Focus stays on the same
+// card when it still exists.
+function refreshHomeGrid() {
+  if (App.screen !== 'home' || App.modalOpen || App.sidebarOpen) return;
+  const focused = App.focusGrid[App.focusRow]?.[App.focusCol] || null;
+  buildHomeGrid();
+  if (!focused || !focused.isConnected) return;
+  for (let r = 0; r < App.focusGrid.length; r++) {
+    const c = App.focusGrid[r].indexOf(focused);
+    if (c >= 0) { setFocus(r, c); return; }
   }
 }
 
 async function loadCollectionsAndPlaylists() {
+  // renderRow shows each row only when it has something in it.
   try {
     const cols = await api('/api/collections');
-    if (cols && cols.length) {
-      document.getElementById('row-collections').classList.remove('hidden');
-      renderRow('items-collections', cols.slice(0, 20), false, false, 'collection');
-    }
+    renderRow('items-collections', (cols || []).slice(0, 20), false, false, 'collection');
   } catch (_) {}
   try {
     const pls = await api('/api/playlists');
-    if (pls && pls.length) {
-      document.getElementById('row-playlists').classList.remove('hidden');
-      renderRow('items-playlists', pls.slice(0, 20), false, false, 'playlist');
-    }
+    renderRow('items-playlists', (pls || []).slice(0, 20), false, false, 'playlist');
   } catch (_) {}
-  buildHomeGrid();
+  // These rows arrive after the rest of the home screen — possibly after the
+  // user has already left it, so never rebuild the grid blindly.
+  refreshHomeGrid();
 }
 
 function renderHero(item) {
   App.heroItem = item;
   const backdrop = document.getElementById('hero-backdrop');
-  if (item.art) {
-    backdrop.style.backgroundImage = `url("${imgUrl(item.art, 1920, 1080)}")`;
-  }
+  // Cleared when the new hero has no art, rather than leaving the previous
+  // title's backdrop behind it.
+  backdrop.style.backgroundImage = item.art
+    ? `url("${imgUrl(item.art, 1920, 1080)}")` : '';
   // Episodes are billed by their show, with the episode as context
   const isEp = item.type === 'episode';
   document.getElementById('hero-title').textContent =
@@ -483,11 +590,19 @@ function renderHero(item) {
  * @param kind          'item' | 'collection' | 'playlist'
  */
 function renderRow(containerId, items, showProgress = false, showWatched = false, kind = 'item') {
-  const container = document.getElementById(containerId);
-  if (!container || !items?.length) return;
-  container.innerHTML = '';
+  renderRowInto(document.getElementById(containerId), items, showProgress, showWatched, kind);
+}
 
-  items.forEach(item => {
+function renderRowInto(container, items, showProgress = false, showWatched = false, kind = 'item') {
+  if (!container) return;
+  container.innerHTML = '';
+  // An empty row is hidden. It used to keep its old cards instead, so once
+  // the last in-progress title was finished, Continue Watching still
+  // offered it.
+  const section = container.closest('.row-section');
+  if (section) section.classList.toggle('hidden', !items?.length);
+
+  (items || []).forEach(item => {
     const card = createPosterCard(item, { showProgress, showWatched, kind });
     container.appendChild(card);
   });
@@ -548,11 +663,11 @@ function createPosterCard(item, opts = {}) {
 
   card.innerHTML = `
     ${thumbPath
-      ? `<img src="${thumb}" alt="${label}" loading="lazy">`
-      : `<div class="poster-fallback">${label}</div>`}
+      ? `<img src="${thumb}" alt="${esc(label)}" loading="lazy">`
+      : `<div class="poster-fallback">${esc(label)}</div>`}
     ${badgeHtml}
     ${progressHtml}
-    <div class="card-title">${label}${sub ? ` <span class="card-sub">${sub}</span>` : ''}</div>
+    <div class="card-title">${esc(label)}${sub ? ` <span class="card-sub">${sub}</span>` : ''}</div>
   `;
 
   // If the proxy/Jellyfin fails to serve the image, swap in a titled placeholder
@@ -683,7 +798,7 @@ async function runSearch() {
   try {
     const items = await api(`/api/search?q=${encodeURIComponent(q)}`);
     if (!items.length) {
-      results.innerHTML = `<div class="lib-loading">No results for "${q}"</div>`;
+      results.innerHTML = `<div class="lib-loading">No results for "${esc(q)}"</div>`;
       return;
     }
     results.innerHTML = '';
@@ -768,7 +883,7 @@ async function runYtSearch() {
     const items = await api(`/api/yt/search?q=${encodeURIComponent(q)}`);
     if (items.error) throw new Error(items.error);
     if (!items.length) {
-      results.innerHTML = `<div class="lib-loading">No results for "${q}"</div>`;
+      results.innerHTML = `<div class="lib-loading">No results for "${esc(q)}"</div>`;
       return;
     }
     renderYtCards(items);
@@ -788,11 +903,11 @@ function renderYtCards(items, preserveFocus = true) {
     const dur = v.duration ? formatTime(v.duration) : '';
     card.innerHTML = `
       <div class="yt-thumb-wrap">
-        <img src="${v.thumb}" alt="" loading="lazy">
+        <img src="${esc(v.thumb)}" alt="" loading="lazy">
         ${dur ? `<span class="yt-dur">${dur}</span>` : ''}
       </div>
-      <div class="yt-card-title">${(v.title || '').replace(/</g, '&lt;')}</div>
-      <div class="yt-card-channel">${(v.channel || '').replace(/</g, '&lt;')}</div>
+      <div class="yt-card-title">${esc(v.title)}</div>
+      <div class="yt-card-channel">${esc(v.channel)}</div>
     `;
     card.onclick = () => playYtVideo(v);
     results.appendChild(card);
@@ -890,6 +1005,8 @@ async function playYtVideo(v) {
     ytStartStream(0, true);
     setupVideoEvents(video, App.currentItem);
     startYtWatchdog();
+    setMediaSessionInfo({ type: 'yt', title: info.title || v.title,
+                          channel: info.channel || v.channel, thumb: v.thumb });
   } catch (e) {
     console.error('playYtVideo error:', e);
     showToast('⚠ Could not play video');
@@ -924,15 +1041,40 @@ function startYtWatchdog() {
   const video = document.getElementById('video-player');
   let lastT = video.currentTime;
   let stalls = 0;
+  let failures = 0;
   App._ytWatch = setInterval(() => {
     if (!App.ytPlayback || App.screen !== 'player') return;
+    // The stream answered with an error — YouTube refused it (the backend
+    // says so with a 502). Retry once, then say so: reconnecting forever
+    // only produced an endless black screen of "Reconnecting…" toasts.
+    if (video.error) {
+      if (++failures > 1) {
+        stopYtWatchdog();
+        console.warn('[JHT] YouTube stream failed:', video.error);
+        showToast('⚠ YouTube refused this video — yt-dlp may need updating', 8000);
+        return;
+      }
+      ytReconnect(true);
+      return;
+    }
     if (video.paused || video.ended) { lastT = video.currentTime; stalls = 0; return; }
     // Let it finish naturally near the end instead of restarting past it.
     const durS = App.ytPlayback.duration / 1000;
     const absPos = App.ytPlayback.offset + video.currentTime;
     if (durS && absPos >= durS - 3) { lastT = video.currentTime; stalls = 0; return; }
-    // Grace period right after a (re)start while the pipe re-buffers.
-    if (Date.now() - (App._ytLastRestart || 0) < 6000) { lastT = video.currentTime; return; }
+    const sinceRestart = Date.now() - (App._ytLastRestart || 0);
+    if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+      // Nothing has arrived since the (re)start. A seek waits here while
+      // ffmpeg reads forward to the new position, which takes as long as
+      // YouTube takes to deliver everything before it — tens of seconds deep
+      // into a 4K video. Restarting after a few seconds (as this used to)
+      // just began that wait again, so a long seek could never finish.
+      if (sinceRestart < 120000) { lastT = video.currentTime; return; }
+    } else if (sinceRestart < 6000) {
+      // Grace period right after a (re)start while the pipe re-buffers.
+      lastT = video.currentTime;
+      return;
+    }
     if (Math.abs(video.currentTime - lastT) < 0.04) {
       if (++stalls >= 4) {          // ~4s wanting to play but frozen
         stalls = 0;
@@ -941,6 +1083,7 @@ function startYtWatchdog() {
       }
     } else {
       stalls = 0;
+      if (video.currentTime > 2) failures = 0;    // healthy again
     }
     lastT = video.currentTime;
   }, 1000);
@@ -962,6 +1105,120 @@ function ytSeekTo(targetSecs) {
 function ytPositionMs() {
   const v = document.getElementById('video-player');
   return (App.ytPlayback.offset + v.currentTime) * 1000;
+}
+
+// ── SETTINGS (version + updates) ───────────────────────────────────────────
+let settingsPoll = null;
+
+function openSettings() {
+  showScreen('settings');
+  refreshSettings();
+  clearInterval(settingsPoll);
+  // Progress and status change on their own (downloads, background checks).
+  settingsPoll = setInterval(() => {
+    if (App.screen !== 'settings') { clearInterval(settingsPoll); settingsPoll = null; return; }
+    refreshSettings();
+  }, 2000);
+}
+
+function updateStatusText(st) {
+  switch (st.status) {
+    case 'disabled':    return 'Running from source — updates apply to the installed program.';
+    case 'checking':    return 'Checking for updates…';
+    case 'downloading': return `Downloading version ${st.latest}… ${st.progress || 0}%`;
+    case 'ready':       return `Version ${st.latest} is ready to install.`;
+    case 'installing':  return `Installing ${st.latest} — the app restarts in a moment…`;
+    case 'up-to-date':  return 'You have the latest version.';
+    case 'error':       return `Couldn't check for updates: ${st.error || 'unknown error'}`;
+    default:            return 'Not checked yet.';
+  }
+}
+
+async function refreshSettings() {
+  let st;
+  try { st = await api('/api/update/status'); } catch (_) { return; }
+  App.updateStatus = st;
+  const busy = ['checking', 'downloading', 'installing'].includes(st.status);
+  document.getElementById('set-version').textContent = st.version;
+  document.getElementById('set-status').textContent = updateStatusText(st);
+  document.getElementById('set-notes').textContent =
+    st.status === 'ready' && st.notes ? st.notes : '';
+  document.getElementById('set-ytdlp').textContent =
+    st.ytDlp ? `YouTube engine (yt-dlp) ${st.ytDlp}` : '';
+
+  const check = document.getElementById('btn-set-check');
+  const install = document.getElementById('btn-set-install');
+  const auto = document.getElementById('btn-set-auto');
+  check.disabled = !st.enabled || busy;
+  auto.disabled = !st.enabled;
+  auto.textContent = `Automatic updates: ${st.autoUpdate ? 'On' : 'Off'}`;
+  const showInstall = st.status === 'ready';
+  const changed = install.classList.contains('hidden') === showInstall;
+  install.classList.toggle('hidden', !showInstall);
+  if (showInstall) install.textContent = `⬇ Install ${st.latest} now`;
+  // The Install button appearing or going changes the D-pad rows.
+  if (changed && App.screen === 'settings' && !App.modalOpen) buildSettingsGrid(true);
+}
+
+function buildSettingsGrid(preserveFocus = false) {
+  const focused = App.focusGrid[App.focusRow]?.[App.focusCol] || null;
+  const back = document.getElementById('settings-back-btn');
+  back.onclick = () => goBack();
+  document.getElementById('btn-set-check').onclick = async () => {
+    try { await apiPost('/api/update/check'); } catch (_) {}
+    showToast('⟳ Checking for updates…');
+    refreshSettings();
+  };
+  document.getElementById('btn-set-install').onclick = async () => {
+    try {
+      await apiPost('/api/update/install');
+      showToast('⬇ Installing — back in a moment', 8000);
+    } catch (_) { showToast('⚠ Nothing ready to install'); }
+    refreshSettings();
+  };
+  document.getElementById('btn-set-auto').onclick = async () => {
+    const enabled = !(App.updateStatus && App.updateStatus.autoUpdate);
+    try { await apiPost('/api/update/auto', { enabled }); } catch (_) {}
+    showToast(`Automatic updates ${enabled ? 'on' : 'off'}`);
+    refreshSettings();
+  };
+
+  const buttons = [...document.querySelectorAll('#settings-body .settings-actions .hero-btn')]
+    .filter(b => !b.classList.contains('hidden'));
+  App.focusGrid = [[back], ...buttons.map(b => [b])];
+  if (preserveFocus && focused) {
+    for (let r = 0; r < App.focusGrid.length; r++) {
+      if (App.focusGrid[r][0] === focused) { setFocus(r, 0); return; }
+    }
+  }
+  setFocus(1, 0);
+}
+
+// After an update the server restarts and this page reconnects. If the
+// server is now a different version, the page is stale — reload it; once on
+// the new version, say what happened (once).
+async function checkAppVersion() {
+  try {
+    const st = await api('/api/update/status');
+    if (window.APP_VERSION && st.version && st.version !== window.APP_VERSION) {
+      location.reload();
+      return;
+    }
+    if (st.justUpdatedFrom && localStorage.getItem('pht_updated_seen') !== st.version) {
+      localStorage.setItem('pht_updated_seen', st.version);
+      showToast(`✅ Updated to version ${st.version}`, 6000);
+    }
+  } catch (_) {}
+}
+
+// Keypresses on the TV itself never reach the server, so report them
+// (throttled): an automatic update waits until the TV has been left alone.
+let lastActivityPing = 0;
+function noteActivity() {
+  const now = Date.now();
+  if (now - lastActivityPing < 15000) return;
+  lastActivityPing = now;
+  if (socket.connected) socket.emit('activity');
 }
 
 // ── COLLECTION / PLAYLIST drill-down ───────────────────────────────────────
@@ -1215,7 +1472,7 @@ function openPicker(title, options, current, onPick) {
   options.forEach(opt => {
     const row = document.createElement('button');
     row.className = 'track-row focusable' + (String(opt.value) === String(current) ? ' selected' : '');
-    row.innerHTML = `<span>${opt.label}</span><span class="track-tick">${String(opt.value) === String(current) ? '✓' : ''}</span>`;
+    row.innerHTML = `<span>${esc(opt.label)}</span><span class="track-tick">${String(opt.value) === String(current) ? '✓' : ''}</span>`;
     row.onclick = () => {
       closeModal();
       onPick(opt.value);
@@ -1252,15 +1509,18 @@ async function showDetail(item) {
     App.detailItem = meta;
   } catch (_) {}
 
-  // Backdrop
+  // Backdrop, falling back to the poster; neither → plain background.
+  const posterPath = posterThumbPath(meta);
+  const bdPath = meta.art || posterPath;
   const bd = document.getElementById('detail-backdrop');
-  if (meta.art) {
-    bd.style.backgroundImage = `url("${imgUrl(meta.art, 1920, 1080)}")`;
-  } else {
-    bd.style.backgroundImage = `url("${imgUrl(meta.thumb, 1920, 1080)}")`;
-  }
+  bd.style.backgroundImage = bdPath ? `url("${imgUrl(bdPath, 1920, 1080)}")` : '';
 
-  document.getElementById('detail-poster').src = imgUrl(meta.thumb, 400, 600);
+  // A title with no poster at all hides the poster slot instead of showing a
+  // broken-image icon.
+  const poster = document.getElementById('detail-poster');
+  document.getElementById('detail-poster-wrap').classList.toggle('hidden', !posterPath);
+  if (posterPath) poster.src = imgUrl(posterPath, 400, 600);
+  else poster.removeAttribute('src');
   document.getElementById('detail-rating-badge').textContent = meta.contentRating || '';
   document.getElementById('detail-title').textContent = meta.title || '';
 
@@ -1305,13 +1565,13 @@ async function showDetail(item) {
   dirEl.innerHTML  = '';
   castEl.innerHTML = '';
   if (directors) {
-    dirEl.innerHTML = `<span class="credit-label">Director:</span> ${directors}` +
-      (writers ? `<span class="credit-sep"></span><span class="credit-label">Writer:</span> ${writers}` : '');
+    dirEl.innerHTML = `<span class="credit-label">Director:</span> ${esc(directors)}` +
+      (writers ? `<span class="credit-sep"></span><span class="credit-label">Writer:</span> ${esc(writers)}` : '');
   } else if (writers) {
-    dirEl.innerHTML = `<span class="credit-label">Writer:</span> ${writers}`;
+    dirEl.innerHTML = `<span class="credit-label">Writer:</span> ${esc(writers)}`;
   }
   if (cast) {
-    castEl.innerHTML = `<span class="credit-label">Cast:</span> ${cast}`;
+    castEl.innerHTML = `<span class="credit-label">Cast:</span> ${esc(cast)}`;
   }
 
   // Play button — shows resume confirmation if applicable
@@ -1384,10 +1644,10 @@ async function loadEpisodes(seasonKey, listEl) {
       progress = `<div class="ep-progress"><div class="ep-progress-fill" style="width:${pct}%"></div></div>`;
     }
     item.innerHTML = `
-      <span class="ep-num">E${ep.index || ''} ${watched}</span>
+      <span class="ep-num">E${ep.index ?? ''} ${watched}</span>
       <div class="ep-body">
-        <div class="ep-t">${ep.title}</div>
-        <div class="ep-d">${ep.summary || ''}</div>
+        <div class="ep-t">${esc(ep.title)}</div>
+        <div class="ep-d">${esc(ep.summary)}</div>
         ${progress}
       </div>
       <span class="ep-dur">${dur}</span>
@@ -1521,7 +1781,12 @@ function decidePlaybackMode(quality, forcedQuality) {
   // Video is fine. Direct play only when BOTH the container and the audio are
   // browser-friendly; otherwise Direct Stream (remux container / audio, keep
   // the original video untouched) — smooth, low CPU, no quality loss.
-  if (containerOk && audioOk) return 'direct';
+  //
+  // The audio track matters too: a browser playing the raw file can only
+  // play its first audio track. When another one is wanted (picked in the
+  // Audio menu, or Jellyfin's language preference chose it), only Direct
+  // Stream, where Jellyfin selects the track, will actually play it.
+  if (containerOk && audioOk && quality.audioIsFirst !== false) return 'direct';
   return 'directStream';
 }
 
@@ -1703,6 +1968,17 @@ function clearOneShotVideoListeners(video) {
 async function playItem(item, startAtSecs = null) {
   const video = document.getElementById('video-player');
 
+  // Moving straight on to another title (Next/Previous, Up Next) never went
+  // through stopPlayback, so Jellyfin was never told the old one stopped:
+  // its transcode ran on and the server kept it as "now playing".
+  const prev = App.currentItem;
+  if (prev && prev.ratingKey && prev.ratingKey !== item.ratingKey &&
+      App.stoppedReported !== prev.ratingKey) {
+    const dur = isFinite(video.duration) ? video.duration * 1000 : (App.streamDuration || 0);
+    reportTimeline(prev.ratingKey, video.currentTime * 1000, dur, 'stopped');
+  }
+  App.stoppedReported = null;
+
   if (App.hls) { App.hls.destroy(); App.hls = null; }
   clearOneShotVideoListeners(video);
   removeSideloadedSubs();
@@ -1784,8 +2060,9 @@ async function playItem(item, startAtSecs = null) {
 
     App.currentItem = item;
     App.streamDuration = urls.duration;
-    reportTimeline(item.ratingKey, 0, urls.duration, 'playing');
+    reportTimeline(item.ratingKey, startAt * 1000, urls.duration, 'playing');
     setupVideoEvents(video, item);
+    setMediaSessionInfo(item);
 
     // Re-apply the subtitle track the server has marked as selected — keeps
     // subs on across track switches, quality reloads and Up Next episodes.
@@ -1840,7 +2117,6 @@ function setupVideoEvents(video, item) {
         position: pos,
         duration: dur,
         title:    item.title,
-        thumb:    item.thumb,
       });
     }
   };
@@ -1863,6 +2139,7 @@ function setupVideoEvents(video, item) {
     clearInterval(video._timelineInterval);
     const dur = video.duration ? video.duration * 1000 : (App.streamDuration || 0);
     reportTimeline(item.ratingKey, dur, dur, 'stopped');
+    App.stoppedReported = item.ratingKey;
 
     // For episodes — try to queue the next episode with a 10s countdown
     if (item.type === 'episode') {
@@ -1952,7 +2229,16 @@ function stopPlayback() {
   }
   const pos = v.currentTime * 1000;
   const dur = v.duration ? v.duration * 1000 : (App.streamDuration || 0);
-  if (App.currentItem) reportTimeline(App.currentItem.ratingKey, pos, dur, 'stopped');
+  // Skipped when the title already ended and reported its own stop — a
+  // second report counted it as played twice.
+  if (App.currentItem && App.stoppedReported !== App.currentItem.ratingKey) {
+    reportTimeline(App.currentItem.ratingKey, pos, dur, 'stopped');
+  }
+  App.stoppedReported = null;
+  // Whatever just played has changed Continue Watching; re-read it on the
+  // way back to the home screen.
+  if (App.homeLoadedAt) App.homeLoadedAt = 1;
+  clearMediaSessionInfo();
   clearOneShotVideoListeners(v);
   stopYtWatchdog();
   v.pause();
@@ -1964,6 +2250,7 @@ function stopPlayback() {
   App.currentItem = null;
   App.playbackMode = null;
   App.ytPlayback = null;
+  App.streamDuration = 0;   // or the phone keeps showing "0:00 / 1:52:10"
   App.currentMediaSource = null;
   App.streamVersions = [];
   document.getElementById('screen-player').classList.remove('yt-mode');
@@ -2296,8 +2583,8 @@ function renderTrackList() {
     const meta = [t.language, t.codec, t.channels ? `${t.channels}ch` : '', t.forced ? 'Forced' : '']
                  .filter(Boolean).join(' · ');
     row.innerHTML = `
-      <span class="track-title">${t.title}</span>
-      <span class="track-meta">${meta}</span>
+      <span class="track-title">${esc(t.title)}</span>
+      <span class="track-meta">${esc(meta)}</span>
       <span class="track-tick">${t.selected ? '✓' : ''}</span>
     `;
     row.onclick = async () => {
@@ -2413,7 +2700,7 @@ function openQualityModal() {
       const row = document.createElement('button');
       row.className = 'track-row focusable' + (active ? ' selected' : '');
       row.innerHTML = `
-        <span class="track-title">${ver.label}</span>
+        <span class="track-title">${esc(ver.label)}</span>
         <span class="track-tick">${active ? '✓' : ''}</span>
       `;
       row.onclick = () => {
@@ -2564,6 +2851,8 @@ function openModal(id, buildFocus) {
 
 function closeModal() {
   if (!App.modalOpen) return;
+  // Up Next has a countdown that must stop with it.
+  if (App.modalOpen === 'next-up') { cancelNextUp(); return; }
   const m = document.getElementById(App.modalOpen);
   if (m) m.classList.add('hidden');
   App.modalOpen = null;
@@ -2579,7 +2868,11 @@ function closeModal() {
 // this costs nothing: measured round-trip is 2-3 ms on a LAN.
 const socket = io(window.SOCKET_URL, { transports: ['polling', 'websocket'] });
 
-socket.on('connect',    () => updateConnBadge(true));
+// Announce this page on every (re)connect. The server recognises a TV page
+// by its state_update, and the TV is otherwise quiet until something changes
+// — so after an app restart the USB-remote bridge believed no TV was open and
+// let the remote's keys fall through to Windows.
+socket.on('connect',    () => { updateConnBadge(true); broadcastState(); checkAppVersion(); });
 socket.on('disconnect', () => updateConnBadge(false));
 socket.on('command',    (data) => handleCommand(data));
 
@@ -2693,7 +2986,8 @@ function broadcastState(extra = {}) {
     subtitle: App.currentItem?.type === 'episode'
               ? `S${App.currentItem?.parentIndex}E${App.currentItem?.index}`
               : (App.currentItem?.year ? String(App.currentItem.year) : ''),
-    thumb:    App.currentItem?.thumb || '',
+    thumb:    App.currentItem && App.currentItem.type !== 'yt'
+              ? (App.currentItem.thumb || posterThumbPath(App.currentItem) || '') : '',
     position: App.ytPlayback ? ytPositionMs() : (v ? v.currentTime * 1000 : 0),
     duration: App.ytPlayback ? App.ytPlayback.duration
               : (v?.duration && isFinite(v.duration) ? v.duration * 1000
@@ -2707,6 +3001,7 @@ function broadcastState(extra = {}) {
 // ── Keyboard navigation ────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   bumpIdle();
+  noteActivity();
   if (App.ssActive) { hideScreensaver(); return; }
 
   // OSK on search / YouTube screens accepts typed characters
@@ -2742,6 +3037,19 @@ document.addEventListener('keydown', (e) => {
     }
     case 'Backspace':
     case 'Escape':     e.preventDefault(); goBack();          break;
+    // Remote buttons that arrive as browser keys when the kiosk has focus.
+    // Unhandled, Chrome acts on them itself: BrowserHome navigated the kiosk
+    // away from the TV UI altogether, and BrowserBack did nothing useful.
+    case 'BrowserBack':
+    case 'GoBack':     e.preventDefault(); goBack();          break;
+    case 'BrowserHome':
+      e.preventDefault();
+      handleCommand({ action: 'home' });
+      break;
+    case 'BrowserSearch':
+      e.preventDefault();
+      if (App.screen !== 'player') openSearch();
+      break;
     case ' ':
       // Space only controls playback inside the player
       if (App.screen === 'player') { e.preventDefault(); togglePlayPause(); }
@@ -2767,6 +3075,49 @@ document.addEventListener('keydown', (e) => {
   }
   resetOverlayTimer();
 });
+
+// ── Hardware media keys (Media Session API) ──────────────────────────────────
+// Chrome hands media keys — a keyboard's or the USB remote's Play/Pause,
+// Next, Previous, Stop — to the page's media session through Windows' media
+// controls, whether or not the kiosk window has focus. With no handlers it
+// could only toggle the <video>; these give the keys the same meaning as the
+// phone remote's buttons, and the metadata shows in Windows' media flyout.
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  const on = (action, cmd) => {
+    try { navigator.mediaSession.setActionHandler(action, () => handleCommand({ action: cmd })); }
+    catch (_) { /* action not supported by this browser */ }
+  };
+  on('play',          'play');
+  on('pause',         'pause');
+  on('stop',          'stop');
+  on('nexttrack',     'next');
+  on('previoustrack', 'previous');
+  on('seekbackward',  'seek_back');
+  on('seekforward',   'seek_fwd');
+}
+
+function setMediaSessionInfo(item) {
+  if (!('mediaSession' in navigator) || !window.MediaMetadata || !item) return;
+  try {
+    const isEp = item.type === 'episode';
+    const poster = item.type === 'yt' ? item.thumb : imgUrl(posterThumbPath(item), 300, 450);
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title:  item.title || '',
+      artist: isEp ? `${item.grandparentTitle || ''} · S${item.parentIndex ?? '?'}E${item.index ?? '?'}`
+                   : (item.type === 'yt' ? (item.channel || 'YouTube') : String(item.year || '')),
+      artwork: poster ? [{ src: new URL(poster, location.origin).href }] : [],
+    });
+  } catch (_) {}
+}
+
+function clearMediaSessionInfo() {
+  if ('mediaSession' in navigator) {
+    try { navigator.mediaSession.metadata = null; } catch (_) {}
+  }
+}
+
+setupMediaSession();
 
 // ── Aspect: apply on each new video and on resize ────────────────────────────
 (() => {
@@ -2813,12 +3164,12 @@ async function cycleLightMode() {
 
 // ── UI Helpers ─────────────────────────────────────────────────────────────
 let toastTimer;
-function showToast(msg) {
+function showToast(msg, ms = 2200) {
   const toast = document.getElementById('toast');
   toast.textContent = msg;
   toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), ms);
 }
 
 let qualityHideTimer;

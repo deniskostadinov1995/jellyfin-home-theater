@@ -6,6 +6,11 @@ flask-socketio>=5.3.6
 simple-websocket>=1.0.0
 requests>=2.31.0
 
-# YouTube app (ad-free playback). Also requires ffmpeg on PATH.
-# Update regularly: YouTube changes break old versions (pip install -U yt-dlp)
-yt-dlp>=2025.1.1
+# YouTube app (ad-free playback). Also requires ffmpeg on PATH, and a
+# JavaScript runtime — Node.js or Deno — which yt-dlp needs to solve YouTube's
+# challenges (without one, YouTube refuses the streams).
+# Update regularly: YouTube changes break old versions:
+#   pip install -U yt-dlp yt-dlp-ejs
+yt-dlp>=2026.10.26
+# yt-dlp's challenge-solver scripts (bundled in yt-dlp.exe, separate on PyPI).
+yt-dlp-ejs>=0.8.0

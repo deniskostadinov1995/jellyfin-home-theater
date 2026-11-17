@@ -266,16 +266,28 @@ def _sender():
             log(f"could not send {action}: {exc}")
 
 
-def tv_alive():
-    """Is a TV page open? Cached, because this is consulted per keypress."""
-    now = time.time()
-    if now - _tv["checked"] > 2.0:
-        _tv["checked"] = now
+def _tv_poller():
+    """Keep `_tv["alive"]` current, on its own thread.
+
+    This used to be refreshed from inside the keyboard hook, which meant an
+    HTTP request in the one place that must never block. While the app was
+    down that request took about two seconds to fail (Windows retries a
+    refused localhost connection), and Windows silently unhooks a hook that
+    keeps stalling — after which the remote stopped being bridged at all
+    until the bridge was restarted.
+    """
+    while True:
         try:
             with urllib.request.urlopen(APP + "/api/tv_status", timeout=2) as r:
                 _tv["alive"] = bool(json.load(r).get("connected"))
         except Exception:
             _tv["alive"] = False
+        _tv["checked"] = time.time()
+        time.sleep(1.0)
+
+
+def tv_alive():
+    """Is a TV page open? A dictionary read — safe inside the hook."""
     return _tv["alive"]
 
 
@@ -414,6 +426,8 @@ def run():
 
     make_window()
     threading.Thread(target=_sender, daemon=True, name="remoteSender").start()
+    if REMOTE_ONLY_WHEN_TV_RUNNING:
+        threading.Thread(target=_tv_poller, daemon=True, name="tvPoller").start()
     hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, _ll_proc,
                                     kernel32.GetModuleHandleW(None), 0)
     if not hook:
