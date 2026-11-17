@@ -45,6 +45,38 @@ UPDATE_LOG = os.path.join(DATA_DIR, "update.log")
 LAUNCHER_LOG = os.path.join(DATA_DIR, "remote_launcher.log")
 
 
+def sanitize_environment():
+    """Make every process this program starts an independent one.
+
+    PyInstaller's bootloader leaves _PYI_* variables in the environment. A
+    child that inherits them — this program starting itself (restart, update,
+    the button listener starting the app) or yt-dlp.exe, another PyInstaller
+    program — is treated as part of the parent: it can load the *parent's*
+    code and runs as a parent/child pair, which is how an update once came up
+    running the wrong copy and then died. PYINSTALLER_RESET_ENVIRONMENT=1 is
+    PyInstaller's documented switch for starting a fresh instance; setting it
+    here, with the _PYI_* variables gone, covers every child we start.
+    """
+    for key in list(os.environ):
+        if key.upper().startswith(("_PYI_", "_MEIPASS")):
+            del os.environ[key]
+    os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
+
+def in_package_context():
+    """True when running inside an MSIX/AppX package's context (for example,
+    started from a packaged app's terminal). Windows then quietly redirects
+    writes under AppData to the package's private copy, so an install made
+    from there would be invisible to Explorer, Startup and everything else."""
+    try:
+        import ctypes
+        length = ctypes.c_uint32(0)
+        rc = ctypes.windll.kernel32.GetCurrentPackageFullName(ctypes.byref(length), None)
+        return rc != 15700          # APPMODEL_ERROR_NO_PACKAGE
+    except Exception:
+        return False
+
+
 def ensure_dirs():
     for d in (DATA_DIR, UPDATES_DIR, TOOLS_DIR) if FROZEN else (DATA_DIR,):
         os.makedirs(d, exist_ok=True)

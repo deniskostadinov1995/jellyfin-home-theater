@@ -280,7 +280,17 @@ def migrate(folder):
     return moved
 
 
-def install(migrate_from=None, start=True):
+PACKAGE_CONTEXT_MESSAGE = (
+    "Jellyfin Home Theater can't be installed from here: this window is running "
+    "inside another app's package, and Windows would quietly hide the "
+    "installation from the rest of the system (Explorer, Startup, Settings).\n\n"
+    "Open the folder in File Explorer and double-click JellyfinHomeTheater.exe "
+    "instead.")
+
+
+def install(migrate_from=None, start=True, start_app=False):
+    if paths.in_package_context():
+        raise OSError(PACKAGE_CONTEXT_MESSAGE)
     src = paths.APP_DIR
     dst = paths.DEFAULT_INSTALL_DIR
     exe = os.path.join(dst, EXE_NAME)
@@ -311,7 +321,7 @@ def install(migrate_from=None, start=True):
     if start:
         subprocess.Popen([exe, "--listener"], cwd=dst, close_fds=True,
                          creationflags=_DETACHED | _NO_WINDOW)
-        if was_running:
+        if was_running or start_app:
             subprocess.Popen([exe], cwd=dst, close_fds=True,
                              creationflags=_DETACHED | _NO_WINDOW)
     _log("install complete")
@@ -325,7 +335,7 @@ def install_main(argv):
         if i + 1 < len(argv):
             migrate_from = argv[i + 1]
     try:
-        install(migrate_from=migrate_from)
+        install(migrate_from=migrate_from, start_app="--start-app" in argv)
     except Exception as exc:
         _log(f"install failed: {exc}")
         if "--quiet" not in argv:
@@ -365,6 +375,12 @@ def offer_install():
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
 def uninstall(quiet=False):
+    if paths.in_package_context():
+        _log("uninstall refused: running inside an app package context")
+        if not quiet:
+            message(PACKAGE_CONTEXT_MESSAGE.replace("installed", "uninstalled"),
+                    MB_OK | MB_ICONERROR)
+        return 2
     if not quiet and message(
             f"Uninstall {APP_NAME}?\n\nYour settings and logs stay in\n"
             f"{paths.DATA_DIR}\n(delete that folder too if you want them gone).",

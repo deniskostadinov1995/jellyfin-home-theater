@@ -44,7 +44,10 @@ from version import __version__, APP_NAME, EXE_NAME, UPDATE_REPO
 
 log = logging.getLogger("update")
 
-MANIFEST_URL = f"https://github.com/{UPDATE_REPO}/releases/latest/download/latest.json"
+# JHT_UPDATE_MANIFEST points the updater at another manifest — for testing an
+# update end to end without publishing a release.
+MANIFEST_URL = (os.environ.get("JHT_UPDATE_MANIFEST")
+                or f"https://github.com/{UPDATE_REPO}/releases/latest/download/latest.json")
 YTDLP_LATEST = "https://github.com/yt-dlp/yt-dlp/releases/latest"
 YTDLP_DOWNLOAD = "https://github.com/yt-dlp/yt-dlp/releases/download/{tag}/{name}"
 
@@ -557,8 +560,18 @@ def _stop(processes, timeout=10):
 
 
 def _start(exe, *args):
-    return subprocess.Popen([exe, *args], cwd=os.path.dirname(exe), close_fds=True,
-                            creationflags=_DETACHED | _NO_WINDOW)
+    """Start the program detached. A freshly written exe is often still being
+    scanned by antivirus, which refuses to run it for a moment ("Access is
+    denied") — so retry for a while rather than give up. Never raises."""
+    for attempt in range(10):
+        try:
+            return subprocess.Popen([exe, *args], cwd=os.path.dirname(exe),
+                                    close_fds=True, creationflags=_DETACHED | _NO_WINDOW)
+        except OSError as exc:
+            _ulog(f"could not start {os.path.basename(exe)} {' '.join(args)}: {exc}"
+                  + (" — retrying" if attempt < 9 else ""))
+            time.sleep(1.5)
+    return None
 
 
 def _healthy(port, version, timeout=HEALTH_TIMEOUT):
@@ -576,7 +589,31 @@ def _healthy(port, version, timeout=HEALTH_TIMEOUT):
 
 def apply_update_main(argv):
     """Install the version this process is (it runs from the staged folder)
-    over --target, then start it and make sure it comes up."""
+    over --target, then start it and make sure it comes up. Whatever goes
+    wrong, the program folder ends up holding a working version and that
+    version is running — an exception never escapes into a dialog."""
+    import traceback
+    try:
+        return _apply_update(argv)
+    except BaseException:
+        _ulog("update failed unexpectedly:\n" + traceback.format_exc())
+        target = os.path.abspath(_arg(argv, "--target", paths.DEFAULT_INSTALL_DIR))
+        backup = target.rstrip("\\/") + ".old"
+        exe = os.path.join(target, EXE_NAME)
+        try:
+            if not os.path.isfile(exe) and os.path.isdir(backup):
+                _rmtree(target)
+                _rename(backup, target)
+                _ulog("restored the previous version")
+            if os.path.isfile(exe) and not _processes_of(exe, exclude={os.getpid()}):
+                _start(exe)
+                _start(exe, "--listener")
+        except BaseException:
+            _ulog("recovery failed:\n" + traceback.format_exc())
+        return 1
+
+
+def _apply_update(argv):
     import psutil
 
     paths.ensure_dirs()
@@ -628,7 +665,9 @@ def apply_update_main(argv):
         _restart_old(target_exe, restart_listener)
         return 1
 
-    # 3. Start the new version and wait for it to answer.
+    # 3. Start the new version and wait for it to answer. (Started with this
+    #    process's environment, which sanitize_environment() has cleaned, so
+    #    each is a fresh, independent instance.)
     _start(target_exe, "--updated-from", from_version)
     if restart_listener:
         _start(target_exe, "--listener")

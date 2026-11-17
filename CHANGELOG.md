@@ -3,6 +3,21 @@
 Each section here becomes the notes of its GitHub release (build.py reads it),
 and the installed program shows them when an update is ready.
 
+## 1.0.1
+
+- Fixed: restarting itself — after an update, or the remote's button starting
+  the app — could leave the new copy running the old copy's code, and an
+  update could stop with the app down. Every copy the program starts is now
+  an independent instance (PyInstaller's environment is reset for it).
+- The updater can no longer stop on an error dialog: anything unexpected is
+  logged to update.log and the previous version is put back and restarted.
+- Starting a freshly installed version is retried while antivirus finishes
+  scanning it.
+- The installer refuses to run from inside another app's package (such as a
+  packaged terminal), where Windows would hide the installation from the
+  rest of the system; double-click the exe in Explorer instead.
+- Unhandled errors go to crash.log instead of a dialog box on the TV.
+
 ## 1.0.0
 
 First release as a Windows program — no Python needed.

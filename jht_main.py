@@ -85,12 +85,39 @@ def _arg(argv, name):
     return None
 
 
+def _crash_log(exc_text):
+    """Unhandled errors go to crash.log instead of PyInstaller's modal
+    "Unhandled exception" dialog, which would sit on the TV until clicked."""
+    try:
+        import time
+        import paths
+        paths.ensure_dirs()
+        import os
+        with open(os.path.join(paths.DATA_DIR, "crash.log"), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {' '.join(sys.argv[1:])}\n"
+                    f"{exc_text}\n")
+    except Exception:
+        pass
+
+
 def main():
+    try:
+        _main()
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+        _crash_log(traceback.format_exc())
+        sys.exit(1)
+
+
+def _main():
     argv = sys.argv[1:]
     import safe_console
     safe_console.enable()
     import paths
     if paths.FROZEN:
+        paths.sanitize_environment()
         _trust_windows_certificates()
 
     if "--apply-update" in argv:
